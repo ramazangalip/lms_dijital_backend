@@ -158,6 +158,7 @@ CORS_ALLOWED_ORIGINS = [
     # "https://yapayzekadesteklisinifs.vercel.app",
     # "https://www.yapayzekadesteklisinif.com.tr",
     "https://lms-dijital-frontend.vercel.app",
+    "https://www.yapayzekadesteklidijitalsinif.com.tr",
 ]
 
 
@@ -166,6 +167,7 @@ CSRF_TRUSTED_ORIGINS = [
     # "https://yapayzekadesteklisinifs.vercel.app",
     # "https://www.yapayzekadesteklisinif.com.tr",
     "https://lms-dijital-frontend.vercel.app",
+    "https://www.yapayzekadesteklidijitalsinif.com.tr",
 ]
 
 

@@ -23,10 +23,14 @@ import json
 
 # --- YARDIMCI FONKSİYONLAR ---
 
+# views.py başındaki importları ve init_vertex_ai kısmını şu şekilde güncelleyin:
+
 def init_vertex_ai():
-    """Vertex AI bağlantısını merkezi olarak yönetir."""
+    """Vertex AI bağlantısını merkezi olarak yönetir ve modeli döndürer."""
     PROJECT_ID = "lmsproject-484210"
     LOCATION = "us-central1"
+    
+    # Kimlik bilgileri kontrolü
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     
     if creds_json:
@@ -34,10 +38,15 @@ def init_vertex_ai():
         credentials = service_account.Credentials.from_service_account_info(creds_dict)
         vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
     else:
+        # Local geliştirme için default kimlikleri kullanır
         vertexai.init(project=PROJECT_ID, location=LOCATION)
     
-    # Endpoint yerine doğrudan modeli döndürelim
-    return GenerativeModel("gemini-1.5-flash") # En hızlı ve verimli genel model
+    # Modeli sistem yönergesi (system instruction) ile başlatarak "Genel AI" yapıyoruz
+    model = GenerativeModel(
+        model_name="gemini-2.5-pro",
+        system_instruction="Sen BÜ-LMS akıllı eğitim asistanısın. Öğrencilere her konuda yardımcı olabilirsin."
+    )
+    return model
 
 # --- ANA İÇERİK VIEW ---
 
@@ -219,15 +228,19 @@ class AIChatView(APIView):
             return Response({"error": "Mesaj boş olamaz."}, status=400)
 
         try:
-            # Genel modelimizi başlatalım
+            # Modeli başlatalım
             model = init_vertex_ai()
             
-            # Öğrencinin sorusunu genel zekaya gönderiyoruz
-            # Ders içeriğine sadık kalmasını istersen prompt'un başına ekleme yapabilirsin
+            # Yanıt oluşturma
             response = model.generate_content(user_message)
-            ai_response_text = response.text
+            
+            # Vertex AI bazen yanıtı bloklayabilir (güvenlik filtreleri vb.)
+            if response and response.candidates:
+                ai_response_text = response.text
+            else:
+                ai_response_text = "Üzgünüm, bu soruya şu an yanıt veremiyorum."
 
-            # Soruyu veritabanına kaydetmeye devam edelim (Hoca panelinde görmek için)
+            # Soruyu kaydet
             if week_id:
                 try:
                     weekly_content = WeeklyContent.objects.get(id=week_id)
@@ -241,7 +254,9 @@ class AIChatView(APIView):
             return Response({"response": ai_response_text}, status=200)
             
         except Exception as e: 
-            return Response({"response": "Asistan şu an cevap veremiyor."}, status=500)
+            # Hatayı terminalde görmek için print ekleyelim
+            print(f"AI Chat Error: {str(e)}")
+            return Response({"response": "Şu an genel bilgi havuzuna erişim sağlanamıyor, lütfen birazdan tekrar deneyin."}, status=500)
 
 # --- QUIZ (SINAV) SİSTEMİ ---
 

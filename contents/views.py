@@ -35,7 +35,9 @@ def init_vertex_ai():
         vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
     else:
         vertexai.init(project=PROJECT_ID, location=LOCATION)
-    return PROJECT_ID, LOCATION
+    
+    # Endpoint yerine doğrudan modeli döndürelim
+    return GenerativeModel("gemini-1.5-flash") # En hızlı ve verimli genel model
 
 # --- ANA İÇERİK VIEW ---
 
@@ -212,21 +214,34 @@ class AIChatView(APIView):
     def post(self, request):
         user_message = request.data.get("message")
         week_id = request.data.get("weekly_content_id")
-        if not user_message: return Response({"error": "Mesaj boş olamaz."}, status=400)
+        
+        if not user_message: 
+            return Response({"error": "Mesaj boş olamaz."}, status=400)
 
         try:
-            p_id, loc = init_vertex_ai()
-            model = GenerativeModel(f"projects/{p_id}/locations/{loc}/endpoints/981343814604029952")
+            # Genel modelimizi başlatalım
+            model = init_vertex_ai()
+            
+            # Öğrencinin sorusunu genel zekaya gönderiyoruz
+            # Ders içeriğine sadık kalmasını istersen prompt'un başına ekleme yapabilirsin
             response = model.generate_content(user_message)
             ai_response_text = response.text
 
+            # Soruyu veritabanına kaydetmeye devam edelim (Hoca panelinde görmek için)
             if week_id:
                 try:
                     weekly_content = WeeklyContent.objects.get(id=week_id)
-                    StudentQuestion.objects.create(student=request.user, weekly_content=weekly_content, question_text=user_message)
+                    StudentQuestion.objects.create(
+                        student=request.user, 
+                        weekly_content=weekly_content, 
+                        question_text=user_message
+                    )
                 except: pass
+                
             return Response({"response": ai_response_text}, status=200)
-        except Exception as e: return Response({"response": "Asistan şu an yanıt veremiyor."}, status=500)
+            
+        except Exception as e: 
+            return Response({"response": "Asistan şu an cevap veremiyor."}, status=500)
 
 # --- QUIZ (SINAV) SİSTEMİ ---
 
@@ -293,9 +308,11 @@ class QuizAIAnalysisView(APIView):
             details = ""
             for ans in wrong_answers:
                 correct_opt = QuizOption.objects.filter(question=ans.question, is_correct=True).first()
-                details += f"Soru: {ans.question.question_text}\nHata: {ans.selected_option.option_text}\nDoğru: {correct_opt.option_text if correct_opt else '?'}\n\n"
+                details += (f"Soru: {ans.question.question_text}\n"
+                           f"Öğrencinin Yanlış Cevabı: {ans.selected_option.option_text}\n"
+                           f"Doğru Cevap: {correct_opt.option_text if correct_opt else '?'}\n\n")
 
-           # --- GÜNCELLENEN PROMPT ---
+            # Analiz için genel zekaya detaylı bir "prompt" gönderiyoruz
             prompt = (
                 f"Bir eğitim danışmanı olarak, öğrencim {user_name} için '{attempt.quiz.title}' sınavındaki "
                 f"%{attempt.score} başarısını analiz et. Hataları:\n{details}\n"
@@ -303,10 +320,10 @@ class QuizAIAnalysisView(APIView):
                 f"Hatalarını nazikçe açıkla, moral ver ve gelişim için ne yapması gerektiğini söyle."
             )
             
-            p_id, loc = init_vertex_ai()
-            model = GenerativeModel(f"projects/{p_id}/locations/{loc}/endpoints/981343814604029952")
+            model = init_vertex_ai()
             response = model.generate_content(prompt)
+            
             return Response({"ai_feedback": response.text}, status=200)
             
         except Exception as e: 
-            return Response({"error": "Analiz başarısız."}, status=500)
+            return Response({"error": "Genel analiz şu an oluşturulamadı."}, status=500)

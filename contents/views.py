@@ -127,27 +127,65 @@ class TrackActivityView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        # DEBUG 1: İsteğin ulaştığını kontrol et
+        print("\n--- DEBUG: TrackActivityView POST İsteği Geldi ---")
+        print(f"Kullanıcı: {request.user}")
+        print(f"Gelen Ham Veri: {request.data}")
+
+        # NOT: Serializer içindeki weekly_content_id alanını CharField olarak güncellediğinden emin ol
         serializer = ActivityTrackSerializer(data=request.data)
+        
         if not serializer.is_valid():
+            # DEBUG 2: Serializer hatası varsa yazdır
+            print(f"Serializer Hatası: {serializer.errors}")
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+        # ID'yi string (metin) olarak alıyoruz, böylece 409 -> 400 yuvarlaması olsa bile 
+        # Frontend'den string gelmesi kaybı önler.
         weekly_content_id = serializer.validated_data.get('weekly_content_id')
         seconds = serializer.validated_data.get('seconds', 30)
         
+        # DEBUG 3: Validasyondan geçen veriler
+        print(f"Validasyon Başarılı - Gelen ID: {weekly_content_id}, Saniye: {seconds}")
+
         try:
+            # Django, string gelen "1145369103256977409" değerini 
+            # Veritabanında BigInt olsa dahi başarıyla sorgular.
             weekly_content = WeeklyContent.objects.get(id=weekly_content_id)
-            tracking, _ = TimeTracking.objects.get_or_create(
+            
+            # DEBUG 4: İçerik bulundu mu?
+            print(f"Haftalık İçerik Bulundu: {weekly_content.title} (Gerçek Veritabanı ID: {weekly_content.id})")
+
+            tracking, created = TimeTracking.objects.get_or_create(
                 student=request.user,
                 weekly_content=weekly_content,
                 date=date.today()
             )
+            
             tracking.duration_seconds += seconds
             tracking.save()
+            
+            # DEBUG 5: Kayıt işlemi
+            print(f"Süre Güncellendi. Yeni Toplam: {tracking.duration_seconds} saniye.")
 
-            StudentProgress.objects.get_or_create(student=request.user, weekly_content=weekly_content)
+            # İlerleme kaydını kontrol et
+            StudentProgress.objects.get_or_create(
+                student=request.user, 
+                weekly_content=weekly_content
+            )
+            print("Öğrenci ilerleme kaydı kontrol edildi/oluşturuldu.")
+            
             return Response({"status": "success"}, status=status.HTTP_200_OK)
+
         except WeeklyContent.DoesNotExist:
-            return Response({"error": "Haftalık içerik bulunamadı."}, status=status.HTTP_404_NOT_FOUND)
+            # DEBUG 6: Buraya düşüyorsa hala yanlış ID geliyordur.
+            print(f"HATA: ID'si {weekly_content_id} olan içerik veritabanında BULUNAMADI!")
+            return Response({"error": "Haftalık içerik bulunamadı. ID uyuşmazlığı olabilir."}, status=status.HTTP_404_NOT_FOUND)
+        
+        except Exception as e:
+            # DEBUG 7: Diğer tüm beklenmedik hatalar
+            print(f"BEKLENMEDİK HATA: {str(e)}")
+            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 class CompleteMaterialView(APIView):
     permission_classes = [IsAuthenticated]
@@ -342,3 +380,54 @@ class QuizAIAnalysisView(APIView):
             
         except Exception as e: 
             return Response({"error": "Genel analiz şu an oluşturulamadı."}, status=500)
+
+class BulkAcademicReportView(APIView):
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        students = User.objects.filter(is_staff=False).order_by('first_name')
+        report_data = []
+
+        for student in students:
+            weekly_stats = []
+            # Öğrencinin tüm zamanlardaki toplam süresi
+            overall_total_seconds = TimeTracking.objects.filter(student=student).aggregate(Sum('duration_seconds'))['duration_seconds__sum'] or 0
+            
+            for i in range(1, 15):
+                # O haftaya ait süre
+                duration = TimeTracking.objects.filter(
+                    student=student, 
+                    weekly_content__week_number=i
+                ).aggregate(Sum('duration_seconds'))['duration_seconds__sum'] or 0
+                
+                # --- YENİ: O haftaya ait tamamlama oranı (Progress) ---
+                progress_record = StudentProgress.objects.filter(
+                    student=student, 
+                    weekly_content__week_number=i
+                ).first()
+                progress_value = progress_record.completion_percentage if progress_record else 0
+
+                # O haftaya ait Sınav başarısı
+                attempt = StudentQuizAttempt.objects.filter(
+                    student=student, 
+                    quiz__material__parent_content__week_number=i
+                ).first()
+
+                weekly_stats.append({
+                    "week": i,
+                    "progress": float(progress_value), # Serializer ile uyumlu olması için ekledik
+                    "duration_seconds": duration,
+                    "correct": attempt.correct_answers if attempt else 0,
+                    "wrong": attempt.wrong_answers if attempt else 0,
+                    "has_quiz": True if attempt else False
+                })
+
+            report_data.append({
+                "id": str(student.id),
+                "full_name": f"{student.first_name} {student.last_name}".upper(),
+                "email": student.email,
+                "total_time": overall_total_seconds,
+                "weekly_breakdown": weekly_stats
+            })
+
+        return Response(report_data, status=status.HTTP_200_OK)

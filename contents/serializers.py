@@ -45,6 +45,11 @@ class FlashcardSerializer(serializers.ModelSerializer):
 # --- ANA SERIALIZER ---
 
 class WeeklyContentSerializer(serializers.ModelSerializer):
+    # KRİTİK GÜNCELLEME: ID alanını açıkça CharField yapıyoruz.
+    # Böylece JSON çıktısında "1145369103256977409" (tırnak içinde) gider.
+    # JavaScript tırnak içindeki veriyi asla yuvarlamaz.
+    id = serializers.CharField(read_only=True)
+    
     materials = MaterialSerializer(many=True, required=False)
     flashcards = FlashcardSerializer(many=True, required=False)
     progress = serializers.SerializerMethodField()
@@ -67,9 +72,7 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
         ]
 
     def get_is_locked(self, obj):
-        """
-        Zaman ve Sıralı İlerleme kontrolü yaparak haftanın kilitli olup olmadığını belirler.
-        """
+        """Zaman ve Sıralı İlerleme kontrolü yaparak haftanın kilitli olup olmadığını belirler."""
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
             return True
@@ -80,9 +83,8 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
 
         now = timezone.now()
 
-        # 2. Şart: Zaman Kilidi (Tarih bazlı kontrol)
+        # 2. Şart: Zaman Kilidi
         if obj.release_date:
-            # Eğer model DateTimeField ise, bugünün tarihiyle (saat farkı gözetmeksizin) kıyaslayabiliriz
             if now < obj.release_date:
                 return True
 
@@ -95,7 +97,6 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
                     weekly_content=previous_week
                 ).first()
                 
-                # Önceki hafta kaydı yoksa veya %100 tamamlanmadıysa kilitli kalır
                 if not prev_progress or not prev_progress.is_completed:
                     return True
         
@@ -109,7 +110,7 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
 
         now = timezone.now()
 
-        # Zaman kilidi mesajı (Format: 26.01.2026)
+        # Zaman kilidi mesajı
         if obj.release_date and now < obj.release_date:
             formatted_date = obj.release_date.strftime('%d.%m.%Y')
             return f"Bu içerik {formatted_date} tarihinde erişime açılacaktır."
@@ -237,8 +238,9 @@ class IntroCompleteSerializer(serializers.Serializer):
     # Artık global bir kilit olduğu için parametre gerekmeyebilir ama uyumluluk için durabilir
     weekly_content_id = serializers.IntegerField(required=False)
 
+# serializers.py içindeki ilgili kısım
 class ActivityTrackSerializer(serializers.Serializer):
-    weekly_content_id = serializers.IntegerField()
+    weekly_content_id = serializers.CharField() 
     seconds = serializers.IntegerField(default=30)
 
 class StudentAnalyticsSerializer(serializers.ModelSerializer):
@@ -305,3 +307,22 @@ class QuizAIAnalysisSerializer(serializers.Serializer):
     score = serializers.IntegerField()
     correct_answers = serializers.IntegerField()
     wrong_answers = serializers.IntegerField()
+
+
+
+class BulkWeeklyStatSerializer(serializers.Serializer):
+    """Her bir haftanın durumunu temsil eder"""
+    week = serializers.IntegerField()
+    progress = serializers.FloatField()
+    duration_seconds = serializers.IntegerField()
+    correct = serializers.IntegerField() # Eklendi
+    wrong = serializers.IntegerField()   # Eklendi
+    has_quiz = serializers.BooleanField() # Eklendi
+
+class BulkAcademicReportSerializer(serializers.Serializer):
+    """Tüm öğrenci verisini paketler"""
+    id = serializers.CharField() # ID uyuşmazlığı riskine karşı CharField daha güvenli
+    full_name = serializers.CharField()
+    email = serializers.EmailField()
+    total_time = serializers.IntegerField()
+    weekly_breakdown = BulkWeeklyStatSerializer(many=True)

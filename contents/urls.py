@@ -2,14 +2,15 @@ from django.urls import path
 from .views import *
 
 urlpatterns = [
+      # Öğrencinin veri göndereceği endpoint
+    path('track-activity/', TrackActivityView.as_view(), name='track_activity'),
     # Hem öğrencilerin listelemesi hem de hocaların içerik eklemesi için ortak endpoint
     path('list/', WeeklyContentView.as_view(), name='weekly_contents_list'),
     
     # Belirli bir haftanın detaylarını (video ve podcast listesini) getirmek için
     path('week/<int:week_number>/', ContentDetailView.as_view(), name='week_detail'),
 
-    # Öğrencinin veri göndereceği endpoint
-    path('track-activity/', TrackActivityView.as_view(), name='track_activity'),
+  
     
     # Hocanın tüm öğrencileri göreceği endpoint
     path('teacher/analytics/', TeacherAnalyticsView.as_view(), name='teacher_analytics'),
@@ -26,6 +27,7 @@ urlpatterns = [
     path('quiz-analysis/<int:attempt_id>/', QuizAIAnalysisView.as_view(), name='quiz-ai-analysis'),
     path('quiz-last-attempt/<int:quiz_id>/', QuizLastAttemptView.as_view(), name='quiz-last-attempt'),
     path('weeks/complete-intro/', CompleteIntroVideoView.as_view(), name='complete-intro'),
+    path('bulk-academic-report/', BulkAcademicReportView.as_view(), name='bulk-report'),
     
 
 ]

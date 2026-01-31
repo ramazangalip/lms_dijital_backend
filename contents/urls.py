@@ -29,5 +29,5 @@ urlpatterns = [
     path('weeks/complete-intro/', CompleteIntroVideoView.as_view(), name='complete-intro'),
     path('bulk-academic-report/', BulkAcademicReportView.as_view(), name='bulk-report'),
     
-
+ 
 ]

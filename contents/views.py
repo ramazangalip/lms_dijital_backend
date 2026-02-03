@@ -125,99 +125,96 @@ class ContentDetailView(APIView):
 
 class TrackActivityView(APIView):
     permission_classes = [IsAuthenticated]
-
     def post(self, request):
-        # DEBUG 1: İsteğin ulaştığını kontrol et
-        print("\n--- DEBUG: TrackActivityView POST İsteği Geldi ---")
-        print(f"Kullanıcı: {request.user}")
-        print(f"Gelen Ham Veri: {request.data}")
-
-        # NOT: Serializer içindeki weekly_content_id alanını CharField olarak güncellediğinden emin ol
         serializer = ActivityTrackSerializer(data=request.data)
-        
         if not serializer.is_valid():
-            # DEBUG 2: Serializer hatası varsa yazdır
-            print(f"Serializer Hatası: {serializer.errors}")
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
-
-        # ID'yi string (metin) olarak alıyoruz, böylece 409 -> 400 yuvarlaması olsa bile 
-        # Frontend'den string gelmesi kaybı önler.
+        
         weekly_content_id = serializer.validated_data.get('weekly_content_id')
         seconds = serializer.validated_data.get('seconds', 30)
-        
-        # DEBUG 3: Validasyondan geçen veriler
-        print(f"Validasyon Başarılı - Gelen ID: {weekly_content_id}, Saniye: {seconds}")
 
         try:
-            # Django, string gelen "1145369103256977409" değerini 
-            # Veritabanında BigInt olsa dahi başarıyla sorgular.
             weekly_content = WeeklyContent.objects.get(id=weekly_content_id)
-            
-            # DEBUG 4: İçerik bulundu mu?
-            print(f"Haftalık İçerik Bulundu: {weekly_content.title} (Gerçek Veritabanı ID: {weekly_content.id})")
-
-            tracking, created = TimeTracking.objects.get_or_create(
+            # SADECE SÜREYİ KAYDET (İlerlemeye dokunma!)
+            tracking, _ = TimeTracking.objects.get_or_create(
                 student=request.user,
                 weekly_content=weekly_content,
                 date=date.today()
             )
-            
             tracking.duration_seconds += seconds
             tracking.save()
-            
-            # DEBUG 5: Kayıt işlemi
-            print(f"Süre Güncellendi. Yeni Toplam: {tracking.duration_seconds} saniye.")
-
-            # İlerleme kaydını kontrol et
-            StudentProgress.objects.get_or_create(
-                student=request.user, 
-                weekly_content=weekly_content
-            )
-            print("Öğrenci ilerleme kaydı kontrol edildi/oluşturuldu.")
-            
             return Response({"status": "success"}, status=status.HTTP_200_OK)
-
         except WeeklyContent.DoesNotExist:
-            # DEBUG 6: Buraya düşüyorsa hala yanlış ID geliyordur.
-            print(f"HATA: ID'si {weekly_content_id} olan içerik veritabanında BULUNAMADI!")
-            return Response({"error": "Haftalık içerik bulunamadı. ID uyuşmazlığı olabilir."}, status=status.HTTP_404_NOT_FOUND)
-        
-        except Exception as e:
-            # DEBUG 7: Diğer tüm beklenmedik hatalar
-            print(f"BEKLENMEDİK HATA: {str(e)}")
-            return Response({"error": str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            return Response({"error": "İçerik bulunamadı."}, status=status.HTTP_404_NOT_FOUND)
 
 class CompleteMaterialView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        print("\n" + "="*60)
+        print(f"DEBUG: [CompleteMaterialView] POST BAŞLADI")
+        print(f"DEBUG: Gelen Data -> {request.data}")
+
         serializer = CompleteMaterialSerializer(data=request.data)
         if not serializer.is_valid():
+            print(f"DEBUG: Serializer Hatası! -> {serializer.errors}")
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-        material_id = serializer.validated_data.get('material_id')
-        material = get_object_or_404(Material, id=material_id)
-        weekly_content = material.parent_content
+        material_id_raw = serializer.validated_data.get('material_id')
+        print(f"DEBUG: İşlenen ID (String) -> {material_id_raw}")
+
+        # Veritabanında var mı diye kontrol edelim
+        material_exists = Material.objects.filter(id=material_id_raw).exists()
         
+        if not material_exists:
+            print(f"DEBUG: !!! HATA: ID {material_id_raw} Veritabanında YOK !!!")
+            # DB'deki bir örneği basalım ki farkı görelim
+            sample = Material.objects.first()
+            if sample:
+                print(f"DEBUG: DB'deki Örnek Bir ID -> {sample.id}")
+            return Response({"error": "Materyal bulunamadı"}, status=status.HTTP_404_NOT_FOUND)
+
+        material = Material.objects.get(id=material_id_raw)
+        print(f"DEBUG: Materyal Bulundu -> {material.title}")
+
+        weekly_content = material.parent_content
         CompletedMaterial.objects.get_or_create(student=request.user, material=material)
 
-        total_materials = weekly_content.materials.count()
-        completed_count = CompletedMaterial.objects.filter(student=request.user, material__parent_content=weekly_content).count()
+        # İlerleme Hesaplama
+        total_mats = weekly_content.materials.count()
+        done_mats = CompletedMaterial.objects.filter(
+            student=request.user, 
+            material__parent_content=weekly_content
+        ).count()
 
-        percentage = (completed_count / total_materials) * 100 if total_materials > 0 else 0
+        percentage = (done_mats / total_mats) * 100 if total_mats > 0 else 0
+        
         progress, _ = StudentProgress.objects.get_or_create(student=request.user, weekly_content=weekly_content)
         progress.completion_percentage = round(percentage, 2)
         progress.is_completed = (percentage >= 100)
         progress.save()
 
-        return Response({"status": "success", "current_percentage": progress.completion_percentage}, status=status.HTTP_200_OK)
+        print(f"DEBUG: İşlem Başarılı. Yeni Yüzde: %{progress.completion_percentage}")
+        print("="*60 + "\n")
+
+        return Response({
+            "status": "success", 
+            "current_percentage": progress.completion_percentage,
+            "material_id": str(material.id)
+        }, status=status.HTTP_200_OK)
 
 class CompletedMaterialIdsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        completed_ids = CompletedMaterial.objects.filter(student=request.user).values_list('material_id', flat=True)
-        return Response(list(completed_ids))
+        # Tüm ID'leri string olarak dönüyoruz
+        completed_ids = CompletedMaterial.objects.filter(
+            student=request.user
+        ).values_list('material_id', flat=True)
+        
+        string_ids = [str(m_id) for m_id in completed_ids]
+        print(f"DEBUG: CompletedMaterialIdsView -> {len(string_ids)} adet ID gönderildi.")
+        return Response(string_ids)
 
 class StudentProgressListView(APIView):
     permission_classes = [IsAuthenticated]
@@ -266,19 +263,19 @@ class AIChatView(APIView):
             return Response({"error": "Mesaj boş olamaz."}, status=400)
 
         try:
-            # Modeli başlatalım
             model = init_vertex_ai()
-            
-            # Yanıt oluşturma
             response = model.generate_content(user_message)
-            
-            # Vertex AI bazen yanıtı bloklayabilir (güvenlik filtreleri vb.)
+
             if response and response.candidates:
-                ai_response_text = response.text
+                try:
+                 
+                    ai_response_text = "".join([part.text for part in response.candidates[0].content.parts])
+                except (AttributeError, IndexError, Exception):
+               
+                    ai_response_text = "Üzgünüm, bu içeriği şu an işleyemiyorum."
             else:
                 ai_response_text = "Üzgünüm, bu soruya şu an yanıt veremiyorum."
 
-            # Soruyu kaydet
             if week_id:
                 try:
                     weekly_content = WeeklyContent.objects.get(id=week_id)
@@ -287,75 +284,116 @@ class AIChatView(APIView):
                         weekly_content=weekly_content, 
                         question_text=user_message
                     )
-                except: pass
+                except: 
+                    pass
                 
             return Response({"response": ai_response_text}, status=200)
             
         except Exception as e: 
-            # Hatayı terminalde görmek için print ekleyelim
-            print(f"AI Chat Error: {str(e)}")
+            print(f"AI Chat Error Detailed: {str(e)}")
             return Response({"response": "Şu an genel bilgi havuzuna erişim sağlanamıyor, lütfen birazdan tekrar deneyin."}, status=500)
 
 # --- QUIZ (SINAV) SİSTEMİ ---
+
 
 class QuizSubmitView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, quiz_id):
-        quiz = get_object_or_404(Quiz, id=quiz_id)
+       
+        quiz = get_object_or_404(Quiz, id=str(quiz_id))
+        
         if StudentQuizAttempt.objects.filter(student=request.user, quiz=quiz).exists():
             return Response({"error": "Bu testi zaten çözdünüz."}, status=403)
 
         answers_data = request.data.get('answers', [])
         correct_count, wrong_count = 0, 0
-        attempt = StudentQuizAttempt.objects.create(student=request.user, quiz=quiz, score=0, correct_answers=0, wrong_answers=0)
+        attempt = StudentQuizAttempt.objects.create(
+            student=request.user, quiz=quiz, score=0, correct_answers=0, wrong_answers=0
+        )
 
         for ans in answers_data:
-            question = get_object_or_404(QuizQuestion, id=ans.get('question_id'), quiz=quiz)
-            option = get_object_or_404(QuizOption, id=ans.get('option_id'), question=question)
-            if option.is_correct: correct_count += 1
-            else: wrong_count += 1
-            StudentAnswer.objects.create(attempt=attempt, question=question, selected_option=option, is_correct=option.is_correct)
+            
+            q_id = str(ans.get('question_id'))
+            o_id = str(ans.get('option_id'))
+            
+            try:
+                question = get_object_or_404(QuizQuestion, id=q_id, quiz=quiz)
+                option = get_object_or_404(QuizOption, id=o_id, question=question)
+                
+                if option.is_correct:
+                    correct_count += 1
+                else:
+                    wrong_count += 1
+                
+                StudentAnswer.objects.create(
+                    attempt=attempt, question=question, 
+                    selected_option=option, is_correct=option.is_correct
+                )
+            except Exception as e:
+                print(f"DEBUG: Quiz ID Eşleşme Hatası -> {str(e)}")
+          
 
         total = quiz.questions.count()
         attempt.score = round((correct_count / total) * 100) if total > 0 else 0
-        attempt.correct_answers, attempt.wrong_answers = correct_count, (total - correct_count)
+        attempt.correct_answers = correct_count
+        attempt.wrong_answers = (total - correct_count)
         attempt.save()
 
+        
         CompletedMaterial.objects.get_or_create(student=request.user, material=quiz.material)
         
-        # İlerleme Güncelleme
+        
         weekly_content = quiz.material.parent_content
         total_mats = weekly_content.materials.count()
-        done_mats = CompletedMaterial.objects.filter(student=request.user, material__parent_content=weekly_content).count()
+        done_mats = CompletedMaterial.objects.filter(
+            student=request.user, material__parent_content=weekly_content
+        ).count()
+        
         perc = (done_mats / total_mats) * 100 if total_mats > 0 else 0
         prog, _ = StudentProgress.objects.get_or_create(student=request.user, weekly_content=weekly_content)
-        prog.completion_percentage, prog.is_completed = round(perc, 2), (perc >= 100)
+        prog.completion_percentage = round(perc, 2)
+        prog.is_completed = (perc >= 100)
         prog.save()
 
-        return Response({"attempt_id": attempt.id, "score": attempt.score, "correct": correct_count, "wrong": (total - correct_count)}, status=201)
-
+        return Response({
+            "attempt_id": str(attempt.id),  
+            "score": attempt.score, 
+            "correct": correct_count, 
+            "wrong": (total - correct_count)
+        }, status=201)
 class QuizLastAttemptView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, quiz_id):
-        attempt = StudentQuizAttempt.objects.filter(student=request.user, quiz_id=quiz_id).order_by('-completed_at').first()
+        
+        attempt = StudentQuizAttempt.objects.filter(student=request.user, quiz_id=str(quiz_id)).order_by('-completed_at').first()
         if attempt:
             return Response({
-                "id": attempt.id,
+                "id": str(attempt.id), 
                 "score": attempt.score,
+                "correct": attempt.correct_answers,
+                "wrong": attempt.wrong_answers,     
                 "correct_answers": attempt.correct_answers,
-                "wrong_answers": attempt.wrong_answers
+                "wrong_answers": attempt.wrong_answers 
             }, status=200)
-        return Response({"detail": "Henüz çözülmedi"}, status=404)
 
 class QuizAIAnalysisView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, attempt_id):
+        print("\n" + "="*60)
+        print(f"DEBUG: [QuizAIAnalysisView] Analiz İsteği Geldi. ID: {attempt_id}")
+        
         try:
-            attempt = StudentQuizAttempt.objects.get(id=attempt_id, student=request.user)
-            wrong_answers = StudentAnswer.objects.filter(attempt=attempt, is_correct=False)
+            try:
+                attempt = StudentQuizAttempt.objects.get(id=str(attempt_id), student=request.user)
+                print(f"DEBUG: Sınav Kaydı Bulundu -> {attempt.quiz.title}")
+            except StudentQuizAttempt.DoesNotExist:
+                print(f"DEBUG: !!! HATA: ID {attempt_id} ile eşleşen sınav kaydı BULUNAMADI !!!")
+                return Response({"error": "Sınav verisi bulunamadı. Lütfen sayfayı yenileyip tekrar deneyin."}, status=404)
+
+            wrong_answers = StudentAnswer.objects.filter(attempt=attempt, is_correct=False).select_related('question')
             user_name = request.user.first_name if request.user.first_name else request.user.username
             
             details = ""
@@ -365,7 +403,7 @@ class QuizAIAnalysisView(APIView):
                            f"Öğrencinin Yanlış Cevabı: {ans.selected_option.option_text}\n"
                            f"Doğru Cevap: {correct_opt.option_text if correct_opt else '?'}\n\n")
 
-            # Analiz için genel zekaya detaylı bir "prompt" gönderiyoruz
+   
             prompt = (
                 f"Bir eğitim danışmanı olarak, öğrencim {user_name} için '{attempt.quiz.title}' sınavındaki "
                 f"%{attempt.score} başarısını analiz et. Hataları:\n{details}\n"
@@ -373,13 +411,22 @@ class QuizAIAnalysisView(APIView):
                 f"Hatalarını nazikçe açıkla, moral ver ve gelişim için ne yapması gerektiğini söyle."
             )
             
+            print("DEBUG: Vertex AI İsteği Gönderiliyor...")
             model = init_vertex_ai()
             response = model.generate_content(prompt)
             
+            
+            if not response or not response.text:
+                print("DEBUG: AI Modelinden boş yanıt döndü.")
+                return Response({"ai_feedback": "Tebrikler, sınavı tamamladın! Şu an detaylı analiz oluşturulamıyor ama başarılarının devamını dilerim."}, status=200)
+
+            print("DEBUG: Analiz Başarıyla Oluşturuldu.")
+            print("="*60 + "\n")
             return Response({"ai_feedback": response.text}, status=200)
             
         except Exception as e: 
-            return Response({"error": "Genel analiz şu an oluşturulamadı."}, status=500)
+            print(f"DEBUG: !!! BEKLENMEDİK HATA !!! -> {str(e)}")
+            return Response({"error": f"Sistemsel bir hata oluştu: {str(e)}"}, status=500)
 
 class BulkAcademicReportView(APIView):
     permission_classes = [IsAdminUser]
@@ -390,24 +437,24 @@ class BulkAcademicReportView(APIView):
 
         for student in students:
             weekly_stats = []
-            # Öğrencinin tüm zamanlardaki toplam süresi
+           
             overall_total_seconds = TimeTracking.objects.filter(student=student).aggregate(Sum('duration_seconds'))['duration_seconds__sum'] or 0
             
             for i in range(1, 15):
-                # O haftaya ait süre
+             
                 duration = TimeTracking.objects.filter(
                     student=student, 
                     weekly_content__week_number=i
                 ).aggregate(Sum('duration_seconds'))['duration_seconds__sum'] or 0
                 
-                # --- YENİ: O haftaya ait tamamlama oranı (Progress) ---
+              
                 progress_record = StudentProgress.objects.filter(
                     student=student, 
                     weekly_content__week_number=i
                 ).first()
                 progress_value = progress_record.completion_percentage if progress_record else 0
 
-                # O haftaya ait Sınav başarısı
+              
                 attempt = StudentQuizAttempt.objects.filter(
                     student=student, 
                     quiz__material__parent_content__week_number=i
@@ -415,7 +462,7 @@ class BulkAcademicReportView(APIView):
 
                 weekly_stats.append({
                     "week": i,
-                    "progress": float(progress_value), # Serializer ile uyumlu olması için ekledik
+                    "progress": float(progress_value), 
                     "duration_seconds": duration,
                     "correct": attempt.correct_answers if attempt else 0,
                     "wrong": attempt.wrong_answers if attempt else 0,

@@ -15,8 +15,7 @@ class WeeklyContent(models.Model):
         help_text="Bu tarih gelmeden öğrenci içeriğe erişemez."
     )
     
-    # --- TANITIM VİDEOSU ALANLARI (Model eklemeden Hafta 1 üzerinde tutulur) ---
-    # Bu alanlar hoca panelinden Hafta 1 seçiliyken doldurulur.
+
     intro_title = models.CharField(max_length=255, default="Genel Tanıtım", verbose_name="Tanıtım Başlığı")
     intro_video_url = models.URLField(blank=True, null=True, verbose_name="Tanıtım Videosu (Embed Link)")
 

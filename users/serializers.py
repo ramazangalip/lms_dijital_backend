@@ -69,7 +69,7 @@ class PasswordResetSerializer(serializers.Serializer):
         if not value.endswith('@bingol.edu.tr'):
             raise serializers.ValidationError("Sadece @bingol.edu.tr uzantılı adresler şifre sıfırlayabilir.")
         
-        # 2. Kayıtlı Kullanıcı Kontrolü
+        
         if not User.objects.filter(email=value).exists():
             raise serializers.ValidationError("Bu e-posta adresiyle kayıtlı bir kullanıcı bulunamadı.")
         
@@ -79,25 +79,20 @@ class PasswordResetSerializer(serializers.Serializer):
         email = data.get('email')
         code = data.get('code')
 
-        # 3. OTP Kod Doğruluğu Kontrolü
         otp_record = EmailOTP.objects.filter(email=email, code=code).first()
         if not otp_record:
             raise serializers.ValidationError({"code": "Doğrulama kodu geçersiz veya hatalı."})
-        
-        # Kodun süresinin dolup dolmadığını burada kontrol edebilirsin (isteğe bağlı)
+
         
         return data
 
     def save(self):
         email = self.validated_data['email']
         new_password = self.validated_data['new_password']
-        
-        # Şifreyi güncelle
         user = User.objects.get(email=email)
         user.set_password(new_password)
         user.save()
-        
-        # Kullanılan OTP kodunu sil
+
         EmailOTP.objects.filter(email=email).delete()
         
         return user

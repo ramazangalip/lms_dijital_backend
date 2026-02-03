@@ -9,28 +9,31 @@ User = get_user_model()
 # --- ALT MODELLER ---
 
 class QuizOptionSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True) 
     class Meta:
         model = QuizOption
         fields = ['id', 'option_text', 'is_correct']
-        extra_kwargs = {'id': {'read_only': False, 'required': False}}
 
 class QuizQuestionSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
     options = QuizOptionSerializer(many=True)
     class Meta:
         model = QuizQuestion
         fields = ['id', 'question_text', 'order', 'options']
-        extra_kwargs = {'id': {'read_only': False, 'required': False}}
 
 class QuizSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True) 
     questions = QuizQuestionSerializer(many=True)
     class Meta:
         model = Quiz
         fields = ['id', 'title', 'description', 'questions']
-        extra_kwargs = {'id': {'read_only': False, 'required': False}}
 
 class MaterialSerializer(serializers.ModelSerializer):
+    
+    id = serializers.CharField(read_only=True) 
     quiz = QuizSerializer(required=False, allow_null=True)
     embed_url = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    
     class Meta:
         model = Material
         fields = ['id', 'content_type', 'embed_url', 'title', 'quiz']
@@ -45,21 +48,14 @@ class FlashcardSerializer(serializers.ModelSerializer):
 # --- ANA SERIALIZER ---
 
 class WeeklyContentSerializer(serializers.ModelSerializer):
-    # KRİTİK GÜNCELLEME: ID alanını açıkça CharField yapıyoruz.
-    # Böylece JSON çıktısında "1145369103256977409" (tırnak içinde) gider.
-    # JavaScript tırnak içindeki veriyi asla yuvarlamaz.
     id = serializers.CharField(read_only=True)
-    
     materials = MaterialSerializer(many=True, required=False)
     flashcards = FlashcardSerializer(many=True, required=False)
     progress = serializers.SerializerMethodField()
     is_completed = serializers.SerializerMethodField()
     is_intro_watched = serializers.SerializerMethodField()
-    
-    # --- YENİ KİLİT ALANLARI ---
     is_locked = serializers.SerializerMethodField()
     lock_reason = serializers.SerializerMethodField()
-    
     week_number = serializers.IntegerField(validators=[])
 
     class Meta:
@@ -76,19 +72,13 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
             return True
-        
-        # 1. Akademisyenler için kilit yoktur
         if getattr(request.user, 'is_teacher', False) or request.user.is_staff:
             return False
 
         now = timezone.now()
-
-        # 2. Şart: Zaman Kilidi
         if obj.release_date:
             if now < obj.release_date:
                 return True
-
-        # 3. Şart: Sıralı İlerleme (Önceki hafta bitmediyse)
         if obj.week_number > 1:
             previous_week = WeeklyContent.objects.filter(week_number=obj.week_number - 1).first()
             if previous_week:
@@ -110,12 +100,10 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
 
         now = timezone.now()
 
-        # Zaman kilidi mesajı
         if obj.release_date and now < obj.release_date:
             formatted_date = obj.release_date.strftime('%d.%m.%Y')
             return f"Bu içerik {formatted_date} tarihinde erişime açılacaktır."
 
-        # Başarı kilidi mesajı
         if obj.week_number > 1:
             previous_week = WeeklyContent.objects.filter(week_number=obj.week_number - 1).first()
             if previous_week:
@@ -138,8 +126,8 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
         request = self.context.get('request')
         if request and request.user.is_authenticated:
             progress_obj = StudentProgress.objects.filter(student=request.user, weekly_content=obj).first()
-            return progress_obj.completion_percentage if progress_obj else 0
-        return 0
+            return float(progress_obj.completion_percentage) if progress_obj else 0.0
+        return 0.0
 
     def get_is_completed(self, obj):
         request = self.context.get('request')
@@ -173,7 +161,6 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
             content.intro_video_url = i_url
             content.save()
 
-        # Materyalleri İşle
         keep_mat_ids = []
         for m_item in mats_data:
             q_data = m_item.pop('quiz', None)
@@ -208,7 +195,6 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
                     for o_val in opts_list:
                         QuizOption.objects.create(question=question_instance, **o_val)
 
-        # Flashcardları İşle
         keep_card_ids = []
         for idx, c_item in enumerate(cards_data):
             c_id = c_item.get('id')
@@ -235,10 +221,7 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
 # --- DİĞER SERIALIZERLAR ---
 
 class IntroCompleteSerializer(serializers.Serializer):
-    # Artık global bir kilit olduğu için parametre gerekmeyebilir ama uyumluluk için durabilir
     weekly_content_id = serializers.IntegerField(required=False)
-
-# serializers.py içindeki ilgili kısım
 class ActivityTrackSerializer(serializers.Serializer):
     weekly_content_id = serializers.CharField() 
     seconds = serializers.IntegerField(default=30)
@@ -290,11 +273,13 @@ class StudentAnalyticsSerializer(serializers.ModelSerializer):
         return breakdown
 
 class CompleteMaterialSerializer(serializers.Serializer):
-    material_id = serializers.IntegerField()
+    material_id = serializers.CharField()
 
 class StudentProgressSerializer(serializers.ModelSerializer):
+    weekly_content = serializers.CharField(source='weekly_content.id')
     week_number = serializers.ReadOnlyField(source='weekly_content.week_number')
     week_title = serializers.ReadOnlyField(source='weekly_content.title')
+    
     class Meta:
         model = StudentProgress
         fields = ['id', 'weekly_content', 'week_number', 'week_title', 'is_completed', 'completion_percentage', 'last_accessed']
@@ -303,6 +288,7 @@ class AIChatSerializer(serializers.Serializer):
     message = serializers.CharField(required=True, min_length=1)
 
 class QuizAIAnalysisSerializer(serializers.Serializer):
+    attempt_id = serializers.CharField(read_only=True) 
     ai_feedback = serializers.CharField()
     score = serializers.IntegerField()
     correct_answers = serializers.IntegerField()
@@ -321,7 +307,7 @@ class BulkWeeklyStatSerializer(serializers.Serializer):
 
 class BulkAcademicReportSerializer(serializers.Serializer):
     """Tüm öğrenci verisini paketler"""
-    id = serializers.CharField() # ID uyuşmazlığı riskine karşı CharField daha güvenli
+    id = serializers.CharField() 
     full_name = serializers.CharField()
     email = serializers.EmailField()
     total_time = serializers.IntegerField()

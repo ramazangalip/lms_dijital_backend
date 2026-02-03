@@ -20,8 +20,7 @@ class SendOTPView(APIView):
         email = request.data.get('email')
         if not email or not email.endswith('@bingol.edu.tr'):
             return Response({"error": "Geçerli bir kurum adresi giriniz."}, status=400)
-        
-        # Kayıt senaryosu: Email zaten varsa hata ver
+
         if User.objects.filter(email=email).exists():
             return Response({"error": "Bu e-posta zaten kayıtlı."}, status=400)
 
@@ -49,8 +48,7 @@ class SendResetOTPView(SendOTPView):
         email = request.data.get('email')
         if not email:
             return Response({"error": "E-posta gerekli."}, status=400)
-        
-        # Sıfırlama senaryosu: Email yoksa kod gönderme
+
         if not User.objects.filter(email=email).exists():
             return Response({"error": "Bu e-posta adresiyle kayıtlı bir kullanıcı bulunamadı."}, status=404)
 

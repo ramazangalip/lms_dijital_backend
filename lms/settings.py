@@ -169,14 +169,8 @@ CSRF_TRUSTED_ORIGINS = [
     # "https://www.yapayzekadesteklisinif.com.tr",
     "https://lms-dijital-frontend.vercel.app",
     "https://www.yapayzekadesteklidijitalsinif.com.tr",
-    "https://zonal-milly-ramazansaidgalips-9a8d4b32.koyeb.app"
+    
 ]
-
-# 3. Session ve Cookie ayarları (HTTPS zorunluluğu için prodda şart)
-SESSION_COOKIE_SECURE = True
-CSRF_COOKIE_SECURE = True
-SESSION_COOKIE_SAMESITE = 'None'
-CSRF_COOKIE_SAMESITE = 'None'
 
 
 

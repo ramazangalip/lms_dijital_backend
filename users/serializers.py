@@ -11,6 +11,7 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
         token['email'] = user.email
         token['is_teacher'] = user.is_teacher
         token['is_student'] = user.is_student
+        token['department'] = user.department  
         token['full_name'] = f"{user.first_name} {user.last_name}"
         
         return token
@@ -18,10 +19,11 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
 class RegisterSerializer(serializers.ModelSerializer):
     code = serializers.CharField(write_only=True, required=True)
     password = serializers.CharField(write_only=True, required=True, validators=[validate_password])
+    department = serializers.ChoiceField(choices=User.DEPARTMENT_CHOICES, required=True)
     
     class Meta:
         model = User
-        fields = ['email', 'password', 'first_name', 'last_name', 'code']
+        fields = ['email', 'password', 'first_name', 'last_name', 'code', 'department']
 
     def validate_email(self, value):
         if not value.endswith('@bingol.edu.tr'):
@@ -50,6 +52,7 @@ class RegisterSerializer(serializers.ModelSerializer):
             password=validated_data['password'],
             first_name=validated_data.get('first_name', ''),
             last_name=validated_data.get('last_name', ''),
+            department=validated_data.get('department'),
             is_student=True,
             is_teacher=False
         )

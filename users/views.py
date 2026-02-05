@@ -15,6 +15,7 @@ class MyTokenObtainPairView(TokenObtainPairView):
 class SendOTPView(APIView):
     """Kayıt için OTP gönderir (Email sistemde olmamalı)"""
     permission_classes = [AllowAny]
+    authentication_classes = []
 
     def post(self, request):
         email = request.data.get('email')
@@ -43,6 +44,7 @@ class SendOTPView(APIView):
             return Response({"error": "E-posta hatası."}, status=500)
 
 class SendResetOTPView(SendOTPView):
+    authentication_classes = []
     """Şifre sıfırlama için OTP gönderir (Email sistemde kayıtlı olmalı)"""
     def post(self, request):
         email = request.data.get('email')
@@ -58,6 +60,7 @@ class RegisterView(generics.CreateAPIView):
     queryset = User.objects.all()
     serializer_class = RegisterSerializer
     permission_classes = [AllowAny]
+    authentication_classes = []
 
 class PasswordResetConfirmView(APIView):
     """Kodu ve yeni şifreyi alır, doğrularsa şifreyi günceller."""

@@ -55,6 +55,7 @@ class Material(models.Model):
         ('video', 'Video'),
         ('podcast', 'Podcast'),
         ('form', 'Bilgi Testi'),
+        ('pdf', 'Ders Notu (PDF)'),
     )
     parent_content = models.ForeignKey(
         WeeklyContent, 
@@ -62,13 +63,16 @@ class Material(models.Model):
         on_delete=models.CASCADE
     )
     content_type = models.CharField(max_length=10, choices=CONTENT_TYPES)
-    embed_url = models.URLField(verbose_name="Materyal Linki")
+    embed_url = models.URLField(verbose_name="Materyal Linki", help_text="Video/Podcast embed kodu veya OneDrive PDF indirme linki.")
     title = models.CharField(max_length=200, verbose_name="Materyal Başlığı")
+    
+   
+    point_value = models.PositiveIntegerField(default=0, verbose_name="Tamamlama Puanı")
 
     def __str__(self):
-        return f"Hafta {self.parent_content.week_number} | {self.get_content_type_display()} - {self.title}"
+        return f"{self.get_content_type_display()} - {self.title}"
+    
 
-# --- TAKİP MODELLERİ ---
 
 class StudentProgress(models.Model):
     student = models.ForeignKey(User, on_delete=models.CASCADE)

@@ -153,34 +153,39 @@ class CompleteMaterialView(APIView):
     def post(self, request):
         print("\n" + "="*60)
         print(f"DEBUG: [CompleteMaterialView] POST BAŞLADI")
-        print(f"DEBUG: Gelen Data -> {request.data}")
-
+        
         serializer = CompleteMaterialSerializer(data=request.data)
         if not serializer.is_valid():
-            print(f"DEBUG: Serializer Hatası! -> {serializer.errors}")
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         material_id_raw = serializer.validated_data.get('material_id')
-        print(f"DEBUG: İşlenen ID (String) -> {material_id_raw}")
 
-        # Veritabanında var mı diye kontrol edelim
-        material_exists = Material.objects.filter(id=material_id_raw).exists()
-        
-        if not material_exists:
-            print(f"DEBUG: !!! HATA: ID {material_id_raw} Veritabanında YOK !!!")
-            # DB'deki bir örneği basalım ki farkı görelim
-            sample = Material.objects.first()
-            if sample:
-                print(f"DEBUG: DB'deki Örnek Bir ID -> {sample.id}")
+        # 1. Materyal var mı kontrolü
+        try:
+            material = Material.objects.get(id=material_id_raw)
+        except Material.DoesNotExist:
             return Response({"error": "Materyal bulunamadı"}, status=status.HTTP_404_NOT_FOUND)
 
-        material = Material.objects.get(id=material_id_raw)
-        print(f"DEBUG: Materyal Bulundu -> {material.title}")
+        # 2. Daha önce tamamlanmış mı kontrolü (PUAN İÇİN KRİTİK)
+        # Eğer kayıt varsa created=False döner
+        completed_record, created = CompletedMaterial.objects.get_or_create(
+            student=request.user, 
+            material=material
+        )
 
+        new_points = 0
+        if created:
+            # ÖĞRENCİ BU MATERYALİ İLK KEZ TAMAMLIYOR
+            # Materyal modelindeki point_value kadar puan ekle
+            new_points = material.point_value
+            request.user.total_points += new_points
+            request.user.save()
+            print(f"DEBUG: Öğrenci {new_points} puan kazandı. Yeni Toplam: {request.user.total_points}")
+        else:
+            print("DEBUG: Bu materyal zaten tamamlanmış, puan eklenmedi.")
+
+        # 3. İlerleme Hesaplama (Mevcut kodunuzdaki mantık)
         weekly_content = material.parent_content
-        CompletedMaterial.objects.get_or_create(student=request.user, material=material)
-
-        # İlerleme Hesaplama
         total_mats = weekly_content.materials.count()
         done_mats = CompletedMaterial.objects.filter(
             student=request.user, 
@@ -189,7 +194,10 @@ class CompleteMaterialView(APIView):
 
         percentage = (done_mats / total_mats) * 100 if total_mats > 0 else 0
         
-        progress, _ = StudentProgress.objects.get_or_create(student=request.user, weekly_content=weekly_content)
+        progress, _ = StudentProgress.objects.get_or_create(
+            student=request.user, 
+            weekly_content=weekly_content
+        )
         progress.completion_percentage = round(percentage, 2)
         progress.is_completed = (percentage >= 100)
         progress.save()
@@ -197,10 +205,13 @@ class CompleteMaterialView(APIView):
         print(f"DEBUG: İşlem Başarılı. Yeni Yüzde: %{progress.completion_percentage}")
         print("="*60 + "\n")
 
+        # Frontend'e "new_points_earned" bilgisini gönderiyoruz ki bildirim çıkabilsin
         return Response({
             "status": "success", 
             "current_percentage": progress.completion_percentage,
-            "material_id": str(material.id)
+            "material_id": str(material.id),
+            "new_points_earned": new_points,
+            "total_points": request.user.total_points
         }, status=status.HTTP_200_OK)
 
 class CompletedMaterialIdsView(APIView):
@@ -244,7 +255,7 @@ class TeacherAnalyticsView(APIView):
             return Response(serializer.data)
 
 class StudentAnalyticsView(APIView):
-    permission_classes = [IsAdminUser]
+    permission_classes = [IsAuthenticated] 
     def get(self, request):
         students = User.objects.filter(is_staff=False)
         serializer = StudentAnalyticsSerializer(students, many=True)
@@ -429,32 +440,51 @@ class QuizAIAnalysisView(APIView):
             return Response({"error": f"Sistemsel bir hata oluştu: {str(e)}"}, status=500)
 
 class BulkAcademicReportView(APIView):
+    """
+    Akademisyen Paneli için toplu PDF raporu verisi sağlar.
+    Bölüm filtrelemesi ve puan sistemini destekler.
+    """
     permission_classes = [IsAdminUser]
 
     def get(self, request):
-        students = User.objects.filter(is_staff=False).order_by('first_name')
+        # 1. Filtre parametresini al (Frontend: selectedDepartment)
+        department_filter = request.query_params.get('department', 'all')
+        
+        # 2. Sadece öğrencileri getir (Staff/Teacher hariç)
+        students = User.objects.filter(is_staff=False, is_teacher=False)
+
+        # 3. Eğer spesifik bir bölüm seçildiyse filtrele
+        if department_filter and department_filter != 'all':
+            students = students.filter(department=department_filter)
+        
+        students = students.order_by('first_name')
+        
         report_data = []
 
         for student in students:
             weekly_stats = []
-           
-            overall_total_seconds = TimeTracking.objects.filter(student=student).aggregate(Sum('duration_seconds'))['duration_seconds__sum'] or 0
             
+            # Toplam çalışma süresini hesapla
+            overall_total_seconds = TimeTracking.objects.filter(
+                student=student
+            ).aggregate(Sum('duration_seconds'))['duration_seconds__sum'] or 0
+            
+            # 14 Haftalık döngü
             for i in range(1, 15):
-             
+                # Haftalık süre
                 duration = TimeTracking.objects.filter(
                     student=student, 
                     weekly_content__week_number=i
                 ).aggregate(Sum('duration_seconds'))['duration_seconds__sum'] or 0
                 
-              
+                # Haftalık ilerleme yüzdesi
                 progress_record = StudentProgress.objects.filter(
                     student=student, 
                     weekly_content__week_number=i
                 ).first()
                 progress_value = progress_record.completion_percentage if progress_record else 0
 
-              
+                # Haftalık sınav sonucu
                 attempt = StudentQuizAttempt.objects.filter(
                     student=student, 
                     quiz__material__parent_content__week_number=i
@@ -469,10 +499,13 @@ class BulkAcademicReportView(APIView):
                     "has_quiz": True if attempt else False
                 })
 
+            # Öğrenci verisini paketle (Puan ve Bölüm dahil)
             report_data.append({
                 "id": str(student.id),
                 "full_name": f"{student.first_name} {student.last_name}".upper(),
                 "email": student.email,
+                "department": student.department, # Filtreleme ve PDF başlığı için
+                "total_points": getattr(student, 'total_points', 0), # Kazanılan kümülatif puan
                 "total_time": overall_total_seconds,
                 "weekly_breakdown": weekly_stats
             })

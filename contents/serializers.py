@@ -29,14 +29,13 @@ class QuizSerializer(serializers.ModelSerializer):
         fields = ['id', 'title', 'description', 'questions']
 
 class MaterialSerializer(serializers.ModelSerializer):
-    
     id = serializers.CharField(read_only=True) 
     quiz = QuizSerializer(required=False, allow_null=True)
     embed_url = serializers.CharField(required=False, allow_blank=True, allow_null=True)
     
     class Meta:
         model = Material
-        fields = ['id', 'content_type', 'embed_url', 'title', 'quiz']
+        fields = ['id', 'content_type', 'embed_url', 'title', 'point_value', 'quiz']
         extra_kwargs = {'id': {'read_only': False, 'required': False}}
 
 class FlashcardSerializer(serializers.ModelSerializer):
@@ -217,6 +216,8 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
         content.flashcards.exclude(id__in=keep_card_ids).delete()
 
         return content
+    
+
 
 # --- DİĞER SERIALIZERLAR ---
 
@@ -230,10 +231,17 @@ class StudentAnalyticsSerializer(serializers.ModelSerializer):
     total_time_spent = serializers.SerializerMethodField()
     overall_progress = serializers.SerializerMethodField()
     weekly_breakdown = serializers.SerializerMethodField()
+    # Bölümün ismini (display name) çekmek için choice metodunu kullanıyoruz
+    department_name = serializers.CharField(source='get_department_display', read_only=True)
 
     class Meta:
         model = User
-        fields = ['id', 'first_name', 'last_name', 'email', 'total_time_spent', 'overall_progress', 'weekly_breakdown']
+        # department ve total_points alanlarını ekledik
+        fields = [
+            'id', 'first_name', 'last_name', 'email', 
+            'department', 'department_name', 'total_points', 
+            'total_time_spent', 'overall_progress', 'weekly_breakdown'
+        ]
 
     def get_total_time_spent(self, obj):
         total_seconds = TimeTracking.objects.filter(student=obj).aggregate(total=Sum('duration_seconds'))['total'] or 0
@@ -306,9 +314,12 @@ class BulkWeeklyStatSerializer(serializers.Serializer):
     has_quiz = serializers.BooleanField() # Eklendi
 
 class BulkAcademicReportSerializer(serializers.Serializer):
-    """Tüm öğrenci verisini paketler"""
+    """PDF Raporu için tüm öğrenci verisini paketler"""
     id = serializers.CharField() 
     full_name = serializers.CharField()
     email = serializers.EmailField()
+    # YENİ EKLENEN ALANLAR:
+    department = serializers.CharField() 
+    total_points = serializers.IntegerField()
     total_time = serializers.IntegerField()
     weekly_breakdown = BulkWeeklyStatSerializer(many=True)

@@ -256,7 +256,6 @@ class TeacherAnalyticsView(APIView):
 
 class StudentAnalyticsView(APIView):
     permission_classes = [IsAuthenticated]
-    authentication_classes = []
     def get(self, request):
         students = User.objects.filter(is_staff=False)
         serializer = StudentAnalyticsSerializer(students, many=True)

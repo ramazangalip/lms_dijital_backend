@@ -80,6 +80,9 @@ class StudentProgress(models.Model):
     is_completed = models.BooleanField(default=False)
     completion_percentage = models.FloatField(default=0.0) 
     last_accessed = models.DateTimeField(auto_now=True)
+    
+    # YENİ ALAN: Öğrenci şu an hangi turda? (1 veya 2)
+    current_attempt_round = models.PositiveIntegerField(default=1, verbose_name="Aktif Deneme Turu")
 
     class Meta:
         unique_together = ('student', 'weekly_content')
@@ -91,17 +94,24 @@ class TimeTracking(models.Model):
     weekly_content = models.ForeignKey(WeeklyContent, on_delete=models.CASCADE)
     duration_seconds = models.PositiveIntegerField(default=0)
     date = models.DateField(auto_now_add=True)
+    
+    # YENİ ALAN: Bu süre hangi turda harcandı?
+    attempt_round = models.PositiveIntegerField(default=1)
 
     def __str__(self):
-        return f"{self.student.email} - Hafta {self.weekly_content.week_number} - {self.duration_seconds}s"
+        return f"{self.student.email} - Tur {self.attempt_round} - {self.duration_seconds}s"
     
 class CompletedMaterial(models.Model):
     student = models.ForeignKey(User, on_delete=models.CASCADE)
     material = models.ForeignKey(Material, on_delete=models.CASCADE)
     completed_at = models.DateTimeField(auto_now_add=True)
+    
+    # YENİ ALAN: Hangi turda tamamlandı?
+    attempt_round = models.PositiveIntegerField(default=1)
 
     class Meta:
-        unique_together = ('student', 'material')
+        # Artık bir öğrenci bir materyali farklı turlarda tamamlayabilir
+        unique_together = ('student', 'material', 'attempt_round')
 
 class StudentQuestion(models.Model):
     student = models.ForeignKey(User, on_delete=models.CASCADE)
@@ -144,16 +154,18 @@ class QuizOption(models.Model):
         return self.option_text
 
 class StudentQuizAttempt(models.Model):
-    """Öğrencinin genel sınav sonucu"""
     student = models.ForeignKey(User, on_delete=models.CASCADE)
     quiz = models.ForeignKey(Quiz, on_delete=models.CASCADE)
     score = models.IntegerField() 
     correct_answers = models.IntegerField()
     wrong_answers = models.IntegerField()
     completed_at = models.DateTimeField(auto_now_add=True)
+    
+    # YENİ ALAN: AI analizi öncesi (1) veya sonrası (2) deneme
+    attempt_round = models.PositiveIntegerField(default=1)
 
     def __str__(self):
-        return f"{self.student.first_name} - {self.quiz.title} - %{self.score}"
+        return f"{self.student.first_name} - Tur {self.attempt_round} - %{self.score}"
 
 class StudentAnswer(models.Model):
     """Öğrencinin her bir soruya verdiği spesifik cevap"""

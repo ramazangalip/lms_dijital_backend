@@ -248,35 +248,59 @@ class StudentAnalyticsSerializer(serializers.ModelSerializer):
         return f"{total_seconds // 3600} saat {(total_seconds % 3600) // 60} dakika"
 
     def get_overall_progress(self, obj):
+        # 1. Toplam materyal sayısını al
         total_materials = Material.objects.count()
-        if total_materials == 0: return 0
-        completed_count = CompletedMaterial.objects.filter(student=obj).count()
-        return round((completed_count / total_materials) * 100, 2)
+        if total_materials == 0: 
+            return 0
+            
+        # 2. ÖNEMLİ: Her hafta için sadece AKTİF TURDAKİ tamamlanmaları say
+        # Öğrencinin tüm haftalardaki StudentProgress kayıtlarını (aktif turlarıyla beraber) alıyoruz
+        progresses = StudentProgress.objects.filter(student=obj)
+        
+        current_completed_count = 0
+        for prog in progresses:
+            # Sadece o haftanın o anki aktif turunda (Round 1 veya 2) bitenleri say
+            count = CompletedMaterial.objects.filter(
+                student=obj,
+                material__parent_content=prog.weekly_content,
+                attempt_round=prog.current_attempt_round
+            ).count()
+            current_completed_count += count
+
+        # 3. Yüzdeyi hesapla (Asla %100'ü geçemez)
+        percentage = (current_completed_count / total_materials) * 100
+        return round(min(percentage, 100), 2)
 
     def get_weekly_breakdown(self, obj):
         weeks = WeeklyContent.objects.all().order_by('week_number')
         breakdown = []
         for week in weeks:
+            # TUR 1 VERİLERİ
+            total_sec_1 = TimeTracking.objects.filter(student=obj, weekly_content=week, attempt_round=1).aggregate(total=Sum('duration_seconds'))['total'] or 0
+            quiz_1 = StudentQuizAttempt.objects.filter(student=obj, quiz__material__parent_content=week, attempt_round=1).first()
+            
+            # TUR 2 VERİLERİ
+            total_sec_2 = TimeTracking.objects.filter(student=obj, weekly_content=week, attempt_round=2).aggregate(total=Sum('duration_seconds'))['total'] or 0
+            quiz_2 = StudentQuizAttempt.objects.filter(student=obj, quiz__material__parent_content=week, attempt_round=2).first()
+            
+            # Mevcut ilerleme (ProgressRound modelin varsa oradan, yoksa StudentProgress'ten çekebilirsin)
             progress_obj = StudentProgress.objects.filter(student=obj, weekly_content=week).first()
-            total_sec = TimeTracking.objects.filter(student=obj, weekly_content=week).aggregate(total=Sum('duration_seconds'))['total'] or 0
-            questions = StudentQuestion.objects.filter(student=obj, weekly_content=week).values_list('question_text', flat=True)
-            quiz_results = []
-            attempts = StudentQuizAttempt.objects.filter(student=obj, quiz__material__parent_content=week).select_related('quiz').prefetch_related('answers__question', 'answers__selected_option')
-            for attempt in attempts:
-                for ans in attempt.answers.all():
-                    correct_opt = ans.question.options.filter(is_correct=True).first()
-                    quiz_results.append({
-                        "question_text": ans.question.question_text,
-                        "selected_option": ans.selected_option.option_text if ans.selected_option else "Cevapsız",
-                        "correct_option": correct_opt.option_text if correct_opt else "Belirlenmemiş",
-                        "is_correct": ans.is_correct
-                    })
+
             breakdown.append({
                 "week_number": week.week_number,
                 "progress": progress_obj.completion_percentage if progress_obj else 0,
-                "duration": f"{total_sec // 60} dk",
-                "questions": list(questions),
-                "quiz_results": quiz_results
+                
+                # Tur 1 Sonuçları
+                "duration_1": f"{total_sec_1 // 60} dk",
+                "score_1": quiz_1.score if quiz_1 else 0,
+                "correct_1": quiz_1.correct_answers if quiz_1 else 0,
+                "wrong_1": quiz_1.wrong_answers if quiz_1 else 0,
+
+                # Tur 2 Sonuçları
+                "duration_2": f"{total_sec_2 // 60} dk",
+                "score_2": quiz_2.score if quiz_2 else 0,
+                "correct_2": quiz_2.correct_answers if quiz_2 else 0,
+                "wrong_2": quiz_2.wrong_answers if quiz_2 else 0,
             })
         return breakdown
 
@@ -305,13 +329,21 @@ class QuizAIAnalysisSerializer(serializers.Serializer):
 
 
 class BulkWeeklyStatSerializer(serializers.Serializer):
-    """Her bir haftanın durumunu temsil eder"""
     week = serializers.IntegerField()
     progress = serializers.FloatField()
+    
+    # Tur 1
     duration_seconds = serializers.IntegerField()
-    correct = serializers.IntegerField() # Eklendi
-    wrong = serializers.IntegerField()   # Eklendi
-    has_quiz = serializers.BooleanField() # Eklendi
+    correct = serializers.IntegerField()
+    wrong = serializers.IntegerField()
+    
+    # Tur 2
+    duration_seconds_2 = serializers.IntegerField()
+    correct_2 = serializers.IntegerField()
+    wrong_2 = serializers.IntegerField()
+    
+    has_quiz = serializers.BooleanField()
+    is_round_2_started = serializers.BooleanField()
 
 class BulkAcademicReportSerializer(serializers.Serializer):
     """PDF Raporu için tüm öğrenci verisini paketler"""

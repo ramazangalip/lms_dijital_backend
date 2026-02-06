@@ -125,25 +125,43 @@ class ContentDetailView(APIView):
 
 class TrackActivityView(APIView):
     permission_classes = [IsAuthenticated]
+
     def post(self, request):
+        # Önce gelen veriyi serializer ile doğruluyoruz
         serializer = ActivityTrackSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
+        # Değişkenleri serializer üzerinden alıyoruz (Hatanın çözümü burası)
         weekly_content_id = serializer.validated_data.get('weekly_content_id')
         seconds = serializer.validated_data.get('seconds', 30)
 
         try:
             weekly_content = WeeklyContent.objects.get(id=weekly_content_id)
-            # SADECE SÜREYİ KAYDET (İlerlemeye dokunma!)
+            
+            # Öğrencinin bu hafta için aktif turunu bul
+            progress, _ = StudentProgress.objects.get_or_create(
+                student=request.user, 
+                weekly_content=weekly_content
+            )
+            current_round = progress.current_attempt_round
+
+            # Süreyi aktif tura (attempt_round) göre kaydet
             tracking, _ = TimeTracking.objects.get_or_create(
                 student=request.user,
                 weekly_content=weekly_content,
-                date=date.today()
+                date=date.today(),
+                attempt_round=current_round
             )
             tracking.duration_seconds += seconds
             tracking.save()
-            return Response({"status": "success"}, status=status.HTTP_200_OK)
+            
+            return Response({
+                "status": "success", 
+                "round": current_round,
+                "total_seconds_in_round": tracking.duration_seconds
+            }, status=status.HTTP_200_OK)
+            
         except WeeklyContent.DoesNotExist:
             return Response({"error": "İçerik bulunamadı."}, status=status.HTTP_404_NOT_FOUND)
 
@@ -166,48 +184,54 @@ class CompleteMaterialView(APIView):
         except Material.DoesNotExist:
             return Response({"error": "Materyal bulunamadı"}, status=status.HTTP_404_NOT_FOUND)
 
-        # 2. Daha önce tamamlanmış mı kontrolü (PUAN İÇİN KRİTİK)
-        # Eğer kayıt varsa created=False döner
-        completed_record, created = CompletedMaterial.objects.get_or_create(
-            student=request.user, 
-            material=material
-        )
-
-        new_points = 0
-        if created:
-            # ÖĞRENCİ BU MATERYALİ İLK KEZ TAMAMLIYOR
-            # Materyal modelindeki point_value kadar puan ekle
-            new_points = material.point_value
-            request.user.total_points += new_points
-            request.user.save()
-            print(f"DEBUG: Öğrenci {new_points} puan kazandı. Yeni Toplam: {request.user.total_points}")
-        else:
-            print("DEBUG: Bu materyal zaten tamamlanmış, puan eklenmedi.")
-
-        # 3. İlerleme Hesaplama (Mevcut kodunuzdaki mantık)
         weekly_content = material.parent_content
-        total_mats = weekly_content.materials.count()
-        done_mats = CompletedMaterial.objects.filter(
-            student=request.user, 
-            material__parent_content=weekly_content
-        ).count()
 
-        percentage = (done_mats / total_mats) * 100 if total_mats > 0 else 0
-        
+        # 2. Öğrencinin aktif deneme turunu (Round) tespit et
         progress, _ = StudentProgress.objects.get_or_create(
             student=request.user, 
             weekly_content=weekly_content
         )
+        current_round = progress.current_attempt_round
+        print(f"DEBUG: Öğrenci {weekly_content.week_number}. Hafta için {current_round}. turda.")
+
+        # 3. Materyali BU TUR için tamamlanmış olarak kaydet
+        completed_record, created = CompletedMaterial.objects.get_or_create(
+            student=request.user, 
+            material=material,
+            attempt_round=current_round # Tur bilgisi ile kaydediyoruz
+        )
+
+        new_points = 0
+        # Puan Mantığı: Sadece 1. turda materyal bitirince puan verilir
+        if created and current_round == 1:
+            new_points = material.point_value
+            request.user.total_points += new_points
+            request.user.save()
+            print(f"DEBUG: 1. Tur tamamlaması. {new_points} puan kazandı.")
+        else:
+            print(f"DEBUG: {current_round}. tur kaydı zaten var veya 2. tur olduğu için puan verilmedi.")
+
+        # 4. İlerleme Hesaplama (Sadece aktif olan turdaki materyallere göre)
+        total_mats = weekly_content.materials.count()
+        done_mats_in_current_round = CompletedMaterial.objects.filter(
+            student=request.user, 
+            material__parent_content=weekly_content,
+            attempt_round=current_round # Filtreleme sadece mevcut tura göre yapılır
+        ).count()
+
+        percentage = (done_mats_in_current_round / total_mats) * 100 if total_mats > 0 else 0
+        
         progress.completion_percentage = round(percentage, 2)
+        # Eğer yüzde 100 ise o tur için tamamlandı olarak işaretle
         progress.is_completed = (percentage >= 100)
         progress.save()
 
-        print(f"DEBUG: İşlem Başarılı. Yeni Yüzde: %{progress.completion_percentage}")
+        print(f"DEBUG: {current_round}. Tur İlerlemesi: %{progress.completion_percentage}")
         print("="*60 + "\n")
 
-        # Frontend'e "new_points_earned" bilgisini gönderiyoruz ki bildirim çıkabilsin
         return Response({
             "status": "success", 
+            "round": current_round,
             "current_percentage": progress.completion_percentage,
             "material_id": str(material.id),
             "new_points_earned": new_points,
@@ -218,14 +242,29 @@ class CompletedMaterialIdsView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        # Tüm ID'leri string olarak dönüyoruz
+        from django.db.models import Q
+        
+        # 1. Öğrencinin haftalık tur bilgilerini al
+        student_progresses = StudentProgress.objects.filter(student=request.user)
+        
+        # 2. Dinamik bir filtre oluştur (Hafta X'te Tur Y verilerini getir)
+        query = Q()
+        for prog in student_progresses:
+            query |= Q(
+                material__parent_content=prog.weekly_content, 
+                attempt_round=prog.current_attempt_round
+            )
+        
+        if not query:
+            return Response([])
+
+        # 3. Sadece aktif tura ait olan tamamlanmış materyal ID'lerini çek
         completed_ids = CompletedMaterial.objects.filter(
+            query,
             student=request.user
         ).values_list('material_id', flat=True)
         
-        string_ids = [str(m_id) for m_id in completed_ids]
-        print(f"DEBUG: CompletedMaterialIdsView -> {len(string_ids)} adet ID gönderildi.")
-        return Response(string_ids)
+        return Response([str(m_id) for m_id in completed_ids])
 
 class StudentProgressListView(APIView):
     permission_classes = [IsAuthenticated]
@@ -311,20 +350,43 @@ class QuizSubmitView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request, quiz_id):
-       
+        # 1. Temel nesneleri al
         quiz = get_object_or_404(Quiz, id=str(quiz_id))
+        weekly_content = quiz.material.parent_content
         
-        if StudentQuizAttempt.objects.filter(student=request.user, quiz=quiz).exists():
-            return Response({"error": "Bu testi zaten çözdünüz."}, status=403)
+        # 2. Mevcut tur (round) bilgisini al
+        progress, _ = StudentProgress.objects.get_or_create(
+            student=request.user, 
+            weekly_content=weekly_content
+        )
+        current_round = progress.current_attempt_round
+
+        # 3. Aynı tur içinde mükerrer sınav çözümünü engelle
+        if StudentQuizAttempt.objects.filter(
+            student=request.user, 
+            quiz=quiz, 
+            attempt_round=current_round
+        ).exists():
+            return Response(
+                {"error": f"Bu haftanın testini {current_round}. tur için zaten çözdünüz."}, 
+                status=status.HTTP_403_FORBIDDEN
+            )
 
         answers_data = request.data.get('answers', [])
-        correct_count, wrong_count = 0, 0
+        correct_count = 0
+        
+        # 4. Sınav denemesini (Attempt) aktif tura göre oluştur
         attempt = StudentQuizAttempt.objects.create(
-            student=request.user, quiz=quiz, score=0, correct_answers=0, wrong_answers=0
+            student=request.user, 
+            quiz=quiz, 
+            score=0, 
+            correct_answers=0, 
+            wrong_answers=0,
+            attempt_round=current_round # Hangi turda olduğu kaydediliyor
         )
 
+        # 5. Cevapları işle
         for ans in answers_data:
-            
             q_id = str(ans.get('question_id'))
             o_id = str(ans.get('option_id'))
             
@@ -334,45 +396,51 @@ class QuizSubmitView(APIView):
                 
                 if option.is_correct:
                     correct_count += 1
-                else:
-                    wrong_count += 1
                 
                 StudentAnswer.objects.create(
-                    attempt=attempt, question=question, 
-                    selected_option=option, is_correct=option.is_correct
+                    attempt=attempt, 
+                    question=question, 
+                    selected_option=option, 
+                    is_correct=option.is_correct
                 )
             except Exception as e:
-                print(f"DEBUG: Quiz ID Eşleşme Hatası -> {str(e)}")
-          
+                print(f"DEBUG: Quiz Soru/Cevap Hatası -> {str(e)}")
 
-        total = quiz.questions.count()
-        attempt.score = round((correct_count / total) * 100) if total > 0 else 0
+        # 6. Skor hesapla ve kaydet
+        total_questions = quiz.questions.count()
+        attempt.score = round((correct_count / total_questions) * 100) if total_questions > 0 else 0
         attempt.correct_answers = correct_count
-        attempt.wrong_answers = (total - correct_count)
+        attempt.wrong_answers = total_questions - correct_count
         attempt.save()
 
+        # 7. Sınav materyalini BU TUR için tamamlandı işaretle
+        CompletedMaterial.objects.get_or_create(
+            student=request.user, 
+            material=quiz.material,
+            attempt_round=current_round
+        )
         
-        CompletedMaterial.objects.get_or_create(student=request.user, material=quiz.material)
-        
-        
-        weekly_content = quiz.material.parent_content
+        # 8. İlerleme durumunu güncelle (Round yükseltme BURADA YAPILMIYOR)
         total_mats = weekly_content.materials.count()
         done_mats = CompletedMaterial.objects.filter(
-            student=request.user, material__parent_content=weekly_content
+            student=request.user, 
+            material__parent_content=weekly_content,
+            attempt_round=current_round
         ).count()
         
         perc = (done_mats / total_mats) * 100 if total_mats > 0 else 0
-        prog, _ = StudentProgress.objects.get_or_create(student=request.user, weekly_content=weekly_content)
-        prog.completion_percentage = round(perc, 2)
-        prog.is_completed = (perc >= 100)
-        prog.save()
+        progress.completion_percentage = round(perc, 2)
+        progress.is_completed = (perc >= 100)
+        progress.save()
 
         return Response({
-            "attempt_id": str(attempt.id),  
-            "score": attempt.score, 
-            "correct": correct_count, 
-            "wrong": (total - correct_count)
-        }, status=201)
+            "attempt_id": str(attempt.id),
+            "score": attempt.score,
+            "correct": attempt.correct_answers,
+            "wrong": attempt.wrong_answers,
+            "current_round": current_round,
+            "is_completed": progress.is_completed
+        }, status=status.HTTP_201_CREATED)
 class QuizLastAttemptView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -397,6 +465,7 @@ class QuizAIAnalysisView(APIView):
         print(f"DEBUG: [QuizAIAnalysisView] Analiz İsteği Geldi. ID: {attempt_id}")
         
         try:
+            # 1. Sınav denemesini bul
             try:
                 attempt = StudentQuizAttempt.objects.get(id=str(attempt_id), student=request.user)
                 print(f"DEBUG: Sınav Kaydı Bulundu -> {attempt.quiz.title}")
@@ -404,6 +473,7 @@ class QuizAIAnalysisView(APIView):
                 print(f"DEBUG: !!! HATA: ID {attempt_id} ile eşleşen sınav kaydı BULUNAMADI !!!")
                 return Response({"error": "Sınav verisi bulunamadı. Lütfen sayfayı yenileyip tekrar deneyin."}, status=404)
 
+            # 2. Yanlış cevapları ve analiz detaylarını hazırla
             wrong_answers = StudentAnswer.objects.filter(attempt=attempt, is_correct=False).select_related('question')
             user_name = request.user.first_name if request.user.first_name else request.user.username
             
@@ -414,7 +484,7 @@ class QuizAIAnalysisView(APIView):
                            f"Öğrencinin Yanlış Cevabı: {ans.selected_option.option_text}\n"
                            f"Doğru Cevap: {correct_opt.option_text if correct_opt else '?'}\n\n")
 
-   
+            # 3. AI Prompt ve İçerik Üretimi
             prompt = (
                 f"Bir eğitim danışmanı olarak, öğrencim {user_name} için '{attempt.quiz.title}' sınavındaki "
                 f"%{attempt.score} başarısını analiz et. Hataları:\n{details}\n"
@@ -424,16 +494,38 @@ class QuizAIAnalysisView(APIView):
             
             print("DEBUG: Vertex AI İsteği Gönderiliyor...")
             model = init_vertex_ai()
-            response = model.generate_content(prompt)
+            ai_response = model.generate_content(prompt)
             
-            
-            if not response or not response.text:
+            ai_feedback_text = ""
+            if not ai_response or not ai_response.text:
                 print("DEBUG: AI Modelinden boş yanıt döndü.")
-                return Response({"ai_feedback": "Tebrikler, sınavı tamamladın! Şu an detaylı analiz oluşturulamıyor ama başarılarının devamını dilerim."}, status=200)
+                ai_feedback_text = "Tebrikler, sınavı tamamladın! Şu an detaylı analiz oluşturulamıyor ama başarılarının devamını dilerim."
+            else:
+                ai_feedback_text = ai_response.text
 
-            print("DEBUG: Analiz Başarıyla Oluşturuldu.")
+            # --- 4. KRİTİK: ROUND 2 TETİKLEME MANTIĞI ---
+            # Öğrenci analiz butonuna tıkladığı an Round 2 yetkisi verilir
+            weekly_content = attempt.quiz.material.parent_content
+            progress = StudentProgress.objects.get(student=request.user, weekly_content=weekly_content)
+            
+            is_upgraded = False
+            # Eğer öğrenci 1. turdaysa ve en az 1 yanlışı varsa 2. turu başlat
+            if attempt.wrong_answers > 0 and progress.current_attempt_round == 1:
+                progress.current_attempt_round = 2
+                progress.completion_percentage = 0 # 2. tur için yüzeyi sıfırla
+                progress.is_completed = False      # Tekrar bitirmesi gereksin
+                progress.save()
+                is_upgraded = True
+                print(f"DEBUG: {user_name} için Round 2 aktif edildi. İlerleme sıfırlandı.")
+
+            print("DEBUG: Analiz ve Tur Güncellemesi Başarılı.")
             print("="*60 + "\n")
-            return Response({"ai_feedback": response.text}, status=200)
+            
+            return Response({
+                "ai_feedback": ai_feedback_text,
+                "round_upgraded": is_upgraded,
+                "current_round": progress.current_attempt_round
+            }, status=200)
             
         except Exception as e: 
             print(f"DEBUG: !!! BEKLENMEDİK HATA !!! -> {str(e)}")
@@ -442,18 +534,17 @@ class QuizAIAnalysisView(APIView):
 class BulkAcademicReportView(APIView):
     """
     Akademisyen Paneli için toplu PDF raporu verisi sağlar.
-    Bölüm filtrelemesi ve puan sistemini destekler.
+    1. ve 2. Deneme (Round) verilerini yan yana raporlar.
     """
     permission_classes = [IsAdminUser]
 
     def get(self, request):
-        # 1. Filtre parametresini al (Frontend: selectedDepartment)
+        # 1. Filtre parametresini al
         department_filter = request.query_params.get('department', 'all')
         
-        # 2. Sadece öğrencileri getir (Staff/Teacher hariç)
+        # 2. Sadece öğrencileri getir
         students = User.objects.filter(is_staff=False, is_teacher=False)
 
-        # 3. Eğer spesifik bir bölüm seçildiyse filtrele
         if department_filter and department_filter != 'all':
             students = students.filter(department=department_filter)
         
@@ -464,48 +555,73 @@ class BulkAcademicReportView(APIView):
         for student in students:
             weekly_stats = []
             
-            # Toplam çalışma süresini hesapla
+            # Toplam çalışma süresini (tüm turlar dahil) hesapla
             overall_total_seconds = TimeTracking.objects.filter(
                 student=student
             ).aggregate(Sum('duration_seconds'))['duration_seconds__sum'] or 0
             
             # 14 Haftalık döngü
             for i in range(1, 15):
-                # Haftalık süre
-                duration = TimeTracking.objects.filter(
+                # --- TUR 1 VERİLERİ ---
+                duration_1 = TimeTracking.objects.filter(
                     student=student, 
-                    weekly_content__week_number=i
+                    weekly_content__week_number=i,
+                    attempt_round=1
                 ).aggregate(Sum('duration_seconds'))['duration_seconds__sum'] or 0
                 
-                # Haftalık ilerleme yüzdesi
+                attempt_1 = StudentQuizAttempt.objects.filter(
+                    student=student, 
+                    quiz__material__parent_content__week_number=i,
+                    attempt_round=1
+                ).first()
+
+                # --- TUR 2 VERİLERİ ---
+                duration_2 = TimeTracking.objects.filter(
+                    student=student, 
+                    weekly_content__week_number=i,
+                    attempt_round=2
+                ).aggregate(Sum('duration_seconds'))['duration_seconds__sum'] or 0
+                
+                attempt_2 = StudentQuizAttempt.objects.filter(
+                    student=student, 
+                    quiz__material__parent_content__week_number=i,
+                    attempt_round=2
+                ).first()
+                
+                # Mevcut genel ilerleme (En güncel ilerleme durumu)
                 progress_record = StudentProgress.objects.filter(
                     student=student, 
                     weekly_content__week_number=i
                 ).first()
                 progress_value = progress_record.completion_percentage if progress_record else 0
 
-                # Haftalık sınav sonucu
-                attempt = StudentQuizAttempt.objects.filter(
-                    student=student, 
-                    quiz__material__parent_content__week_number=i
-                ).first()
-
                 weekly_stats.append({
                     "week": i,
-                    "progress": float(progress_value), 
-                    "duration_seconds": duration,
-                    "correct": attempt.correct_answers if attempt else 0,
-                    "wrong": attempt.wrong_answers if attempt else 0,
-                    "has_quiz": True if attempt else False
+                    "progress": float(progress_value), # Mevcut turdaki ilerleme
+                    
+                    # Tur 1 Detayları
+                    "duration_seconds": duration_1,
+                    "correct": attempt_1.correct_answers if attempt_1 else 0,
+                    "wrong": attempt_1.wrong_answers if attempt_1 else 0,
+                    "score_1": attempt_1.score if attempt_1 else 0,
+                    
+                    # Tur 2 Detayları (Yeni alanlar)
+                    "duration_seconds_2": duration_2,
+                    "correct_2": attempt_2.correct_answers if attempt_2 else 0,
+                    "wrong_2": attempt_2.wrong_answers if attempt_2 else 0,
+                    "score_2": attempt_2.score if attempt_2 else 0,
+                    
+                    "has_quiz": True if (attempt_1 or attempt_2) else False,
+                    "is_round_2_started": True if (duration_2 > 0 or attempt_2) else False
                 })
 
-            # Öğrenci verisini paketle (Puan ve Bölüm dahil)
+            # Öğrenci verisini paketle
             report_data.append({
                 "id": str(student.id),
                 "full_name": f"{student.first_name} {student.last_name}".upper(),
                 "email": student.email,
-                "department": student.department, # Filtreleme ve PDF başlığı için
-                "total_points": getattr(student, 'total_points', 0), # Kazanılan kümülatif puan
+                "department": student.department,
+                "total_points": getattr(student, 'total_points', 0),
                 "total_time": overall_total_seconds,
                 "weekly_breakdown": weekly_stats
             })

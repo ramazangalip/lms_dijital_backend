@@ -127,39 +127,40 @@ class TrackActivityView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        # Önce gelen veriyi serializer ile doğruluyoruz
         serializer = ActivityTrackSerializer(data=request.data)
         if not serializer.is_valid():
             return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
         
-        # Değişkenleri serializer üzerinden alıyoruz (Hatanın çözümü burası)
         weekly_content_id = serializer.validated_data.get('weekly_content_id')
         seconds = serializer.validated_data.get('seconds', 30)
+        # YENİ: Frontend'den gelen material_id'yi alıyoruz
+        material_id = request.data.get('material_id') 
 
         try:
             weekly_content = WeeklyContent.objects.get(id=weekly_content_id)
-            
-            # Öğrencinin bu hafta için aktif turunu bul
             progress, _ = StudentProgress.objects.get_or_create(
                 student=request.user, 
                 weekly_content=weekly_content
             )
             current_round = progress.current_attempt_round
 
-            # Süreyi aktif tura (attempt_round) göre kaydet
+            # KRİTİK DEĞİŞİKLİK: 
+            # get_or_create içine 'material' alanını ekliyoruz.
+            # Böylece her materyal için ayrı bir satır oluşur.
             tracking, _ = TimeTracking.objects.get_or_create(
                 student=request.user,
                 weekly_content=weekly_content,
-                date=date.today(),
-                attempt_round=current_round
+                material_id=material_id, # Materyal bazlı satır
+                attempt_round=current_round,
+                date=date.today()
             )
             tracking.duration_seconds += seconds
             tracking.save()
             
             return Response({
                 "status": "success", 
-                "round": current_round,
-                "total_seconds_in_round": tracking.duration_seconds
+                "material": tracking.material.title if tracking.material else "Genel",
+                "total_seconds_in_material": tracking.duration_seconds
             }, status=status.HTTP_200_OK)
             
         except WeeklyContent.DoesNotExist:
@@ -534,7 +535,7 @@ class QuizAIAnalysisView(APIView):
 class BulkAcademicReportView(APIView):
     """
     Akademisyen Paneli için toplu PDF raporu verisi sağlar.
-    1. ve 2. Deneme (Round) verilerini yan yana raporlar.
+    Her haftanın altında o haftaya ait TÜM materyallerin detaylı sürelerini raporlar.
     """
     permission_classes = [IsAdminUser]
 
@@ -542,7 +543,7 @@ class BulkAcademicReportView(APIView):
         # 1. Filtre parametresini al
         department_filter = request.query_params.get('department', 'all')
         
-        # 2. Sadece öğrencileri getir
+        # 2. Sadece öğrencileri getir (Hocalar ve adminler hariç)
         students = User.objects.filter(is_staff=False, is_teacher=False)
 
         if department_filter and department_filter != 'all':
@@ -555,57 +556,81 @@ class BulkAcademicReportView(APIView):
         for student in students:
             weekly_stats = []
             
-            # Toplam çalışma süresini (tüm turlar dahil) hesapla
+            # Öğrencinin sistemdeki tüm zaman kaydı (Genel Toplam)
             overall_total_seconds = TimeTracking.objects.filter(
                 student=student
-            ).aggregate(Sum('duration_seconds'))['duration_seconds__sum'] or 0
+            ).aggregate(total=Sum('duration_seconds'))['total'] or 0
             
             # 14 Haftalık döngü
             for i in range(1, 15):
+                # O haftanın içerik nesnesini bul
+                week_content = WeeklyContent.objects.filter(week_number=i).first()
+                
                 # --- TUR 1 VERİLERİ ---
                 duration_1 = TimeTracking.objects.filter(
                     student=student, 
-                    weekly_content__week_number=i,
+                    weekly_content=week_content,
                     attempt_round=1
-                ).aggregate(Sum('duration_seconds'))['duration_seconds__sum'] or 0
+                ).aggregate(total=Sum('duration_seconds'))['total'] or 0
                 
                 attempt_1 = StudentQuizAttempt.objects.filter(
                     student=student, 
-                    quiz__material__parent_content__week_number=i,
+                    quiz__material__parent_content=week_content,
                     attempt_round=1
                 ).first()
 
                 # --- TUR 2 VERİLERİ ---
                 duration_2 = TimeTracking.objects.filter(
                     student=student, 
-                    weekly_content__week_number=i,
+                    weekly_content=week_content,
                     attempt_round=2
-                ).aggregate(Sum('duration_seconds'))['duration_seconds__sum'] or 0
+                ).aggregate(total=Sum('duration_seconds'))['total'] or 0
                 
                 attempt_2 = StudentQuizAttempt.objects.filter(
                     student=student, 
-                    quiz__material__parent_content__week_number=i,
+                    quiz__material__parent_content=week_content,
                     attempt_round=2
                 ).first()
                 
-                # Mevcut genel ilerleme (En güncel ilerleme durumu)
+                # --- MATERYAL BAZLI DETAYLI SÜRELER ---
+                material_details = []
+                if week_content:
+                    # Haftaya ait tüm materyalleri (Video, PDF, Ödev vb.) al
+                    mats = week_content.materials.all()
+                    for m in mats:
+                        # Bu öğrencinin bu spesifik materyalde harcadığı süre
+                        m_duration = TimeTracking.objects.filter(
+                            student=student,
+                            material=m
+                        ).aggregate(total=Sum('duration_seconds'))['total'] or 0
+                        
+                        material_details.append({
+                            "title": m.title,
+                            "content_type": m.content_type,
+                            "duration_seconds": m_duration
+                        })
+
+                # Mevcut ilerleme durumu
                 progress_record = StudentProgress.objects.filter(
                     student=student, 
-                    weekly_content__week_number=i
+                    weekly_content=week_content
                 ).first()
                 progress_value = progress_record.completion_percentage if progress_record else 0
 
                 weekly_stats.append({
                     "week": i,
-                    "progress": float(progress_value), # Mevcut turdaki ilerleme
+                    "progress": float(progress_value),
                     
-                    # Tur 1 Detayları
+                    # Materyal detay listesi
+                    "material_details": material_details,
+                    
+                    # Tur 1
                     "duration_seconds": duration_1,
                     "correct": attempt_1.correct_answers if attempt_1 else 0,
                     "wrong": attempt_1.wrong_answers if attempt_1 else 0,
                     "score_1": attempt_1.score if attempt_1 else 0,
                     
-                    # Tur 2 Detayları (Yeni alanlar)
+                    # Tur 2
                     "duration_seconds_2": duration_2,
                     "correct_2": attempt_2.correct_answers if attempt_2 else 0,
                     "wrong_2": attempt_2.wrong_answers if attempt_2 else 0,
@@ -615,7 +640,7 @@ class BulkAcademicReportView(APIView):
                     "is_round_2_started": True if (duration_2 > 0 or attempt_2) else False
                 })
 
-            # Öğrenci verisini paketle
+            # Öğrenci paketini oluştur
             report_data.append({
                 "id": str(student.id),
                 "full_name": f"{student.first_name} {student.last_name}".upper(),

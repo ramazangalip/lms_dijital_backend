@@ -56,6 +56,7 @@ class Material(models.Model):
         ('podcast', 'Podcast'),
         ('form', 'Bilgi Testi'),
         ('pdf', 'Ders Notu (PDF)'),
+        ('assignment', 'Ödev (Microsoft Form)'),
     )
     parent_content = models.ForeignKey(
         WeeklyContent, 
@@ -92,6 +93,7 @@ class StudentProgress(models.Model):
 class TimeTracking(models.Model):
     student = models.ForeignKey(User, on_delete=models.CASCADE)
     weekly_content = models.ForeignKey(WeeklyContent, on_delete=models.CASCADE)
+    material = models.ForeignKey(Material, on_delete=models.CASCADE, null=True, blank=True)
     duration_seconds = models.PositiveIntegerField(default=0)
     date = models.DateField(auto_now_add=True)
     
@@ -174,15 +176,29 @@ class StudentAnswer(models.Model):
     selected_option = models.ForeignKey(QuizOption, on_delete=models.CASCADE)
     is_correct = models.BooleanField()
 
+# ... Diğer modellerin (WeeklyContent, Material vb.) aynı kalıyor ...
+
 class Flashcard(models.Model):
+    """
+    Flashcard'ları 'Haftalık Kaynaklar' olarak güncelliyoruz.
+    question -> Kaynağın Başlığı (Örn: Haftalık Özet PDF)
+    answer   -> OneDrive Linki
+    """
     weekly_content = models.ForeignKey(
         WeeklyContent, 
         related_name='flashcards', 
         on_delete=models.CASCADE
     )
-    question = models.TextField()
-    answer = models.TextField()
+    # Alan isimlerini veritabanını bozmamak için aynı tutuyoruz 
+    # ama açıklama ve verbose_name'leri güncelliyoruz.
+    question = models.TextField(verbose_name="Kaynak Başlığı")
+    answer = models.TextField(verbose_name="OneDrive Linki") 
     order = models.IntegerField(default=0)
 
     class Meta:
         ordering = ['order']
+        verbose_name = "Haftalık Kaynak"
+        verbose_name_plural = "Haftalık Kaynaklar"
+
+    def __str__(self):
+        return f"{self.weekly_content.week_number}. Hafta - {self.question}"

@@ -274,34 +274,66 @@ class StudentAnalyticsSerializer(serializers.ModelSerializer):
     def get_weekly_breakdown(self, obj):
         weeks = WeeklyContent.objects.all().order_by('week_number')
         breakdown = []
+        
         for week in weeks:
-            # TUR 1 VERİLERİ
-            total_sec_1 = TimeTracking.objects.filter(student=obj, weekly_content=week, attempt_round=1).aggregate(total=Sum('duration_seconds'))['total'] or 0
-            quiz_1 = StudentQuizAttempt.objects.filter(student=obj, quiz__material__parent_content=week, attempt_round=1).first()
+            # TUR 1 TOPLAM SÜRE
+            total_sec_1 = TimeTracking.objects.filter(
+                student=obj, weekly_content=week, attempt_round=1
+            ).aggregate(total=Sum('duration_seconds'))['total'] or 0
             
-            # TUR 2 VERİLERİ
-            total_sec_2 = TimeTracking.objects.filter(student=obj, weekly_content=week, attempt_round=2).aggregate(total=Sum('duration_seconds'))['total'] or 0
+            # TUR 2 TOPLAM SÜRE
+            total_sec_2 = TimeTracking.objects.filter(
+                student=obj, weekly_content=week, attempt_round=2
+            ).aggregate(total=Sum('duration_seconds'))['total'] or 0
+            
+            # QUIZ SONUÇLARI
+            quiz_1 = StudentQuizAttempt.objects.filter(student=obj, quiz__material__parent_content=week, attempt_round=1).first()
             quiz_2 = StudentQuizAttempt.objects.filter(student=obj, quiz__material__parent_content=week, attempt_round=2).first()
             
-            # Mevcut ilerleme (ProgressRound modelin varsa oradan, yoksa StudentProgress'ten çekebilirsin)
             progress_obj = StudentProgress.objects.filter(student=obj, weekly_content=week).first()
+
+            # --- YENİ: MATERYAL BAZLI DETAYLI SÜRE ANALİZİ ---
+            material_details = []
+            mats = week.materials.all()
+            for m in mats:
+                # Bu materyalde harcanan toplam süre (Round 1 + Round 2 birleşik)
+                m_sec = TimeTracking.objects.filter(
+                    student=obj, 
+                    material=m
+                ).aggregate(total=Sum('duration_seconds'))['total'] or 0
+                
+                material_details.append({
+                    "title": m.title,
+                    "content_type": m.content_type,
+                    "duration_seconds": m_sec
+                })
 
             breakdown.append({
                 "week_number": week.week_number,
                 "progress": progress_obj.completion_percentage if progress_obj else 0,
                 
-                # Tur 1 Sonuçları
-                "duration_1": f"{total_sec_1 // 60} dk",
+                # Karne modalındaki "week.duration" için toplam saniye
+                "duration": total_sec_1 + total_sec_2, 
+                "duration_seconds": total_sec_1 + total_sec_2,
+                
+                # Materyal bazlı liste (Frontend'de map ile dönebilirsin)
+                "material_details": material_details,
+                
+                # Tur 1 Detayları
+                "duration_1": total_sec_1,
                 "score_1": quiz_1.score if quiz_1 else 0,
                 "correct_1": quiz_1.correct_answers if quiz_1 else 0,
                 "wrong_1": quiz_1.wrong_answers if quiz_1 else 0,
 
-                # Tur 2 Sonuçları
-                "duration_2": f"{total_sec_2 // 60} dk",
+                # Tur 2 Detayları
+                "duration_2": total_sec_2,
                 "score_2": quiz_2.score if quiz_2 else 0,
                 "correct_2": quiz_2.correct_answers if quiz_2 else 0,
                 "wrong_2": quiz_2.wrong_answers if quiz_2 else 0,
+                
+             
             })
+            
         return breakdown
 
 class CompleteMaterialSerializer(serializers.Serializer):

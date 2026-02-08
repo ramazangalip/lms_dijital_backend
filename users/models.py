@@ -8,6 +8,7 @@ class User(AbstractUser):
         ('beslenmevediyetetik', 'Beslenme Ve Diyetetik'),
         ('hemsirelik', 'Hemşirelik'),
         ('saglikkurumlarıisletmeciligi', 'Sağlık Kurumları İşletmeciliği'),
+        ('webtasarimvekodlama', 'Web Tasarım Ve Kodlama'),
 
         
     ]

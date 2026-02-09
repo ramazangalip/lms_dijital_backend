@@ -26,27 +26,41 @@ import json
 # views.py başındaki importları ve init_vertex_ai kısmını şu şekilde güncelleyin:
 
 def init_vertex_ai():
-    """Vertex AI bağlantısını merkezi olarak yönetir ve modeli döndürer."""
+    """Vertex AI bağlantısını merkezi ve hatasız olarak yönetir."""
     PROJECT_ID = "lmsproject-484210"
     LOCATION = "us-central1"
     
-    # Kimlik bilgileri kontrolü
+    # 1. Önce ortam değişkenini kontrol et (Canlı ortam/Koyeb için)
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     
-    if creds_json:
-        creds_dict = json.loads(creds_json)
-        credentials = service_account.Credentials.from_service_account_info(creds_dict)
-        vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
-    else:
-        # Local geliştirme için default kimlikleri kullanır
-        vertexai.init(project=PROJECT_ID, location=LOCATION)
-    
-    # Modeli sistem yönergesi (system instruction) ile başlatarak "Genel AI" yapıyoruz
-    model = GenerativeModel(
-        model_name="gemini-2.5-pro",
-        system_instruction="Sen BÜ-LMS akıllı eğitim asistanısın. Öğrencilere her konuda yardımcı olabilirsin."
-    )
-    return model
+    try:
+        if creds_json:
+            creds_dict = json.loads(creds_json)
+            credentials = service_account.Credentials.from_service_account_info(creds_dict)
+            vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
+            print("DEBUG: Vertex AI kimlik bilgileri JSON değişkeninden yüklendi.")
+        else:
+            # 2. LOCAL İÇİN EKSTRA KONTROL: 
+            # Eğer ortam değişkeni yoksa, proje ana dizinindeki dosyayı direkt oku
+            # Dosya adının 'google_creds.json' olduğunu varsayıyorum, değilse ismini düzelt.
+            local_creds_path = os.path.join(settings.BASE_DIR, "google_creds.json")
+            
+            if os.path.exists(local_creds_path):
+                vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=service_account.Credentials.from_service_account_file(local_creds_path))
+                print(f"DEBUG: Local kimlik dosyası yüklendi: {local_creds_path}")
+            else:
+                # 3. Hiçbiri yoksa varsayılanı dene
+                vertexai.init(project=PROJECT_ID, location=LOCATION)
+                print("DEBUG: !!! UYARI: Kimlik bilgisi bulunamadı, varsayılan ADC deneniyor !!!")
+        
+ 
+        return GenerativeModel(
+            model_name="gemini-2.5-pro",
+            system_instruction="Sen BÜ-LMS akıllı eğitim asistanısın."
+        )
+    except Exception as e:
+        print(f"DEBUG: Vertex AI Başlatma Hatası: {str(e)}")
+        raise e
 
 # --- ANA İÇERİK VIEW ---
 

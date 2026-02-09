@@ -26,40 +26,54 @@ import json
 # views.py başındaki importları ve init_vertex_ai kısmını şu şekilde güncelleyin:
 
 def init_vertex_ai():
-    """Vertex AI bağlantısını merkezi ve hatasız olarak yönetir."""
+    """Vertex AI bağlantısını hem local hem Koyeb için ekstra debug logları ile başlatır."""
     PROJECT_ID = "lmsproject-484210"
     LOCATION = "us-central1"
     
-    # 1. Önce ortam değişkenini kontrol et (Canlı ortam/Koyeb için)
+    # 1. Ortam değişkenini kontrol et
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     
     try:
         if creds_json:
-            creds_dict = json.loads(creds_json)
-            credentials = service_account.Credentials.from_service_account_info(creds_dict)
-            vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
-            print("DEBUG: Vertex AI kimlik bilgileri JSON değişkeninden yüklendi.")
+            # CANLI ORTAM DEBUG LOGLARI
+            print(f"DEBUG: [Canlı] GOOGLE_CREDENTIALS_JSON bulundu. Karakter uzunluğu: {len(creds_json)}")
+            
+            try:
+                # JSON temizleme ve yükleme
+                cleaned_json = creds_json.strip()
+                creds_dict = json.loads(cleaned_json)
+                print(f"DEBUG: [Canlı] JSON başarıyla parse edildi. Project ID: {creds_dict.get('project_id')}")
+                
+                credentials = service_account.Credentials.from_service_account_info(creds_dict)
+                vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
+                print("DEBUG: ✅ [Canlı] Vertex AI kimlik bilgileri JSON değişkeninden başarıyla yüklendi.")
+            
+            except json.JSONDecodeError as je:
+                print(f"DEBUG: ❌ [Canlı] JSON Parse Hatası! Metin geçerli bir JSON formatında değil: {str(je)}")
+                raise je
         else:
-            # 2. LOCAL İÇİN EKSTRA KONTROL: 
-            # Eğer ortam değişkeni yoksa, proje ana dizinindeki dosyayı direkt oku
-            # Dosya adının 'google_creds.json' olduğunu varsayıyorum, değilse ismini düzelt.
+            # 2. LOCAL İÇİN: Eğer ortam değişkeni yoksa dizindeki dosyayı ara
+            print("DEBUG: [Sistem] GOOGLE_CREDENTIALS_JSON bulunamadı, local dosya aranıyor...")
             local_creds_path = os.path.join(settings.BASE_DIR, "google_creds.json")
             
             if os.path.exists(local_creds_path):
-                vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=service_account.Credentials.from_service_account_file(local_creds_path))
-                print(f"DEBUG: Local kimlik dosyası yüklendi: {local_creds_path}")
+                credentials = service_account.Credentials.from_service_account_file(local_creds_path)
+                vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
+                print(f"DEBUG: ✅ [Local] Kimlik dosyası yüklendi: {local_creds_path}")
             else:
-                # 3. Hiçbiri yoksa varsayılanı dene
                 vertexai.init(project=PROJECT_ID, location=LOCATION)
-                print("DEBUG: !!! UYARI: Kimlik bilgisi bulunamadı, varsayılan ADC deneniyor !!!")
+                print("DEBUG: ⚠️ [Uyarı] Hiçbir kimlik kaynağı bulunamadı, varsayılan ADC deneniyor.")
         
- 
+        # 3. MODEL BAŞLATMA
+        # Localde çalışan sürümü (gemini-2.5-pro) koruyoruz.
         return GenerativeModel(
             model_name="gemini-2.5-pro",
-            system_instruction="Sen BÜ-LMS akıllı eğitim asistanısın."
+            system_instruction="Sen BÜ-LMS akıllı eğitim asistanısın. Öğrencilere her konuda yardımcı olan samimi bir rehbersin."
         )
+        
     except Exception as e:
-        print(f"DEBUG: Vertex AI Başlatma Hatası: {str(e)}")
+        print(f"DEBUG: ❌ [Kritik] Vertex AI Başlatma Hatası: {str(e)}")
+        # Hatanın detaylarını görmek için traceback de basılabilir
         raise e
 
 # --- ANA İÇERİK VIEW ---

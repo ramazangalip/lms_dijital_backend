@@ -12,14 +12,19 @@ from django.shortcuts import get_object_or_404
 
 
 
-def get_vertex_rest_response(prompt_text):
-    import os
-    import json
-    import requests
-    from django.conf import settings
-    from google.oauth2 import service_account
-    import google.auth.transport.requests
+import httpx # requests yerine httpx kullanacağız, çok daha hafiftir
+import json
+import os
+import asyncio
+from asgiref.sync import sync_to_async,async_to_sync
 
+from django.conf import settings
+from google.oauth2 import service_account
+import google.auth.transport.requests
+
+
+async def get_vertex_rest_response_async(prompt_text):
+    """Koyeb dostu, 8192 token limitli asenkron REST fonksiyonu."""
     PROJECT_ID = "lmsproject-484210"
     LOCATION = "us-central1"
     MODEL_ID = "gemini-2.5-pro"
@@ -27,7 +32,6 @@ def get_vertex_rest_response(prompt_text):
     creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON")
     
     try:
-        # 1. Kimlik Bilgilerini Al (Local/Canlı Uyumlu)
         if creds_json:
             creds_dict = json.loads(creds_json.strip())
             scoped_creds = service_account.Credentials.from_service_account_info(
@@ -42,58 +46,49 @@ def get_vertex_rest_response(prompt_text):
             else:
                 raise Exception("Kimlik bilgisi bulunamadı!")
 
-        # 2. Token Alımı
         auth_req = google.auth.transport.requests.Request()
         scoped_creds.refresh(auth_req)
         token = scoped_creds.token
 
-        # 3. URL ve API İsteği (Kritik: Token Sınırı 8192 Yapıldı)
         url = f"https://{LOCATION}-aiplatform.googleapis.com/v1/projects/{PROJECT_ID}/locations/{LOCATION}/publishers/google/models/{MODEL_ID}:generateContent"
         
         headers = {
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json; charset=utf-8"
         }
-        
+
+        # 1. HAMLE: maxOutputTokens değerini 8192'ye çekiyoruz.
         payload = {
             "contents": [{"role": "user", "parts": [{"text": prompt_text}]}],
             "generationConfig": {
-                "maxOutputTokens": 8192, # Sınırı en üst seviyeye çektik
+                "maxOutputTokens": 8192, 
                 "temperature": 0.7,
                 "top_p": 0.95
             }
         }
 
-        # Uzun yanıtlar için timeout'u 90 saniyeye çıkardık
-        response = requests.post(url, headers=headers, json=payload, timeout=90)
-        res_data = response.json()
+        # 2. HAMLE: Timeout süresini uzun analizler için 120 saniyeye çıkardık.
+        async with httpx.AsyncClient(timeout=120.0) as client:
+            response = await client.post(url, headers=headers, json=payload)
+            res_data = response.json()
+            
+            if 'error' in res_data:
+                print(f"DEBUG: ❌ API Hatası: {res_data['error'].get('message')}")
+                return "Analiz şu an teknik bir sınıra takıldı."
 
-        # 4. Hata ve Yanıt Kontrolü
-        if 'error' in res_data:
-            print(f"DEBUG: ❌ Google API Hatası: {json.dumps(res_data['error'], indent=2)}")
-            raise Exception(f"Google API Hatası: {res_data['error'].get('message')}")
-
-        if 'candidates' not in res_data:
-            print(f"DEBUG: ❌ Beklenmedik Yanıt Formatı: {json.dumps(res_data, indent=2)}")
-            raise Exception("API yanıtında 'candidates' bulunamadı.")
-
-        # 5. TÜM PARÇALARI BİRLEŞTİRME (Kesilmeyi Önleyen Asıl Kısım)
-        full_text = ""
-        candidate = res_data['candidates'][0]
-        if 'content' in candidate and 'parts' in candidate['content']:
-            for part in candidate['content']['parts']:
-                full_text += part.get('text', '')
-        
-        if not full_text:
-            raise Exception("Modelden boş metin döndü.")
-
-        print(f"DEBUG: ✅ Analiz başarıyla tamamlandı. Karakter uzunluğu: {len(full_text)}")
-        return full_text.strip()
+            # 3. HAMLE: Gelen TÜM parçaları (parts) eksiksiz birleştiriyoruz.
+            full_text = ""
+            if 'candidates' in res_data:
+                for candidate in res_data['candidates']:
+                    if 'content' in candidate and 'parts' in candidate['content']:
+                        for part in candidate['content']['parts']:
+                            full_text += part.get('text', '')
+            
+            return full_text.strip()
 
     except Exception as e:
-        print(f"DEBUG: [get_vertex_rest_response] Kritik Hata: {str(e)}")
+        print(f"DEBUG: [Async REST] Kritik Hata: {str(e)}")
         raise e
-    
 class WeeklyContentView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -359,6 +354,7 @@ class AIChatView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
+        """Senkron View, Asenkron AI Çağrısı - RAM ve Darboğaz Dostu."""
         user_message = request.data.get("message")
         week_id = request.data.get("weekly_content_id")
         
@@ -366,40 +362,33 @@ class AIChatView(APIView):
             return Response({"error": "Mesaj boş olamaz."}, status=400)
 
         try:
-            # 1. HAMLE: REST fonksiyonunu çağır ve doğrudan yanıt metnini al
-            # Artık .generate_content() veya .text gibi ek komutlara gerek yok.
-            ai_response_text = get_vertex_rest_response(user_message)
+            print(f"DEBUG: [AIChatView] AI İsteği Gönderiliyor (Async Wrapper)...")
+            
+            # 1. HAMLE: Asenkron AI fonksiyonunu senkron View içinde güvenle çağırıyoruz.
+            # get_vertex_rest_response_async içindeki 8192 limitli yapıyı kullanır.
+            ai_response_text = async_to_sync(get_vertex_rest_response_async)(user_message)
 
-            # 2. HAMLE: Eğer API'den boş yanıt dönerse bir yedek metin ata
             if not ai_response_text:
-                ai_response_text = "Üzgünüm, şu an bu soruya yanıt veremiyorum."
+                ai_response_text = "Şu an yanıt veremiyorum, lütfen kısa süre sonra tekrar deneyin."
 
-            # --- KAYIT MANTIĞI ---
+            # 2. HAMLE: Veritabanı işlemleri (Senkron katmanda olduğu için hatasız çalışır)
             if week_id:
                 try:
-                    # Gelen week_id'nin veritabanında gerçekten olup olmadığını kontrol et
                     weekly_content = WeeklyContent.objects.get(id=week_id)
-                    
-                    # Öğrencinin sorusunu veritabanına kaydet
                     StudentQuestion.objects.create(
                         student=request.user, 
                         weekly_content=weekly_content, 
                         question_text=user_message
                     )
-                    print(f"DEBUG: Soru başarıyla kaydedildi. Hafta ID: {week_id}")
-                except WeeklyContent.DoesNotExist:
-                    print(f"DEBUG: HATA! Soru kaydedilemedi çünkü Hafta ID {week_id} bulunamadı.")
+                    print(f"DEBUG: Chat sorusu kaydedildi. Hafta ID: {week_id}")
                 except Exception as e:
-                    print(f"DEBUG: Soru kaydı sırasında teknik hata: {str(e)}")
-            # ---------------------
-                
-            # Final yanıtını frontend'e gönder
+                    print(f"DEBUG: Veritabanı kayıt hatası: {str(e)}")
+            
             return Response({"response": ai_response_text}, status=200)
             
         except Exception as e: 
-            # REST fonksiyonundan dönen hataları burada yakalıyoruz
             print(f"AI Chat Error Detailed: {str(e)}")
-            return Response({"response": "Şu an genel bilgi havuzuna erişim sağlanamıyor, lütfen birazdan tekrar deneyin."}, status=500)
+            return Response({"response": "Sistem şu an meşgul, lütfen tekrar deneyin."}, status=500)
 
 # --- QUIZ (SINAV) SİSTEMİ ---
 
@@ -519,30 +508,27 @@ class QuizAIAnalysisView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, attempt_id):
+        """Senkron View, Asenkron AI Çağrısı."""
         print("\n" + "="*60)
         print(f"DEBUG: [QuizAIAnalysisView] Analiz İsteği Geldi. ID: {attempt_id}")
         
         try:
-            # 1. Sınav denemesini bul
+            # 1. Sınav verilerini senkron olarak çek (SynchronousOnlyOperation hatasını önler)
             try:
                 attempt = StudentQuizAttempt.objects.get(id=str(attempt_id), student=request.user)
-                print(f"DEBUG: Sınav Kaydı Bulundu -> {attempt.quiz.title}")
             except StudentQuizAttempt.DoesNotExist:
-                print(f"DEBUG: !!! HATA: ID {attempt_id} ile eşleşen sınav kaydı BULUNAMADI !!!")
                 return Response({"error": "Sınav verisi bulunamadı."}, status=404)
 
-            # 2. Yanlış cevapları hazırla
             wrong_answers = StudentAnswer.objects.filter(attempt=attempt, is_correct=False).select_related('question')
-            user_name = request.user.first_name if request.user.first_name else request.user.username
+            user_name = request.user.first_name or request.user.username
             
             details = ""
             for ans in wrong_answers:
                 correct_opt = QuizOption.objects.filter(question=ans.question, is_correct=True).first()
                 details += (f"Soru: {ans.question.question_text}\n"
-                           f"Öğrencinin Yanlış Cevabı: {ans.selected_option.option_text}\n"
+                           f"Öğrencinin Yanlışı: {ans.selected_option.option_text}\n"
                            f"Doğru Cevap: {correct_opt.option_text if correct_opt else '?'}\n\n")
 
-            # 3. AI Prompt Hazırlığı
             prompt = (
                 f"Bir eğitim danışmanı olarak, öğrencim {user_name} için '{attempt.quiz.title}' sınavındaki "
                 f"%{attempt.score} başarısını analiz et. Hataları:\n{details}\n"
@@ -550,18 +536,16 @@ class QuizAIAnalysisView(APIView):
                 f"Hatalarını nazikçe açıkla, moral ver ve gelişim tavsiyesi sun."
             )
             
-            print("DEBUG: Vertex AI REST İsteği Gönderiliyor...")
+            print("DEBUG: Vertex AI REST İsteği (Async Wrapper) Gönderiliyor...")
             
-            # --- KRİTİK DEĞİŞİKLİK BURASI ---
-            # Artık model objesi oluşturmuyoruz, doğrudan fonksiyonu çağırıp yanıtı alıyoruz.
-            ai_feedback_text = get_vertex_rest_response(prompt)
+            # 2. KRİTİK NOKTA: Asenkron AI fonksiyonunu senkron View içinde güvenle çağırıyoruz
+            # Bu işlem sunucunun donmasını (blocking) engelleyen asenkron yapıyı kullanır
+            ai_feedback_text = async_to_sync(get_vertex_rest_response_async)(prompt)
             
             if not ai_feedback_text:
-                print("DEBUG: AI yanıtı boş geldi.")
-                ai_feedback_text = "Şu an detaylı analiz oluşturulamıyor ama başarılarının devamını dilerim!"
-            # -------------------------------
+                ai_feedback_text = "Şu an analiz oluşturulamıyor, lütfen sonra tekrar deneyin."
 
-            # 4. Round 2 Tetikleme Mantığı (Aynı kalıyor)
+            # 3. Round 2 Mantığı (Senkron)
             weekly_content = attempt.quiz.material.parent_content
             progress = StudentProgress.objects.get(student=request.user, weekly_content=weekly_content)
             
@@ -572,11 +556,7 @@ class QuizAIAnalysisView(APIView):
                 progress.is_completed = False      
                 progress.save()
                 is_upgraded = True
-                print(f"DEBUG: {user_name} için Round 2 aktif edildi.")
 
-            print("DEBUG: Analiz Tamamlandı.")
-            print("="*60 + "\n")
-            
             return Response({
                 "ai_feedback": ai_feedback_text,
                 "round_upgraded": is_upgraded,
@@ -584,9 +564,8 @@ class QuizAIAnalysisView(APIView):
             }, status=200)
             
         except Exception as e: 
-            print(f"DEBUG: !!! BEKLENMEDİK HATA !!! -> {str(e)}")
+            print(f"DEBUG: !!! HATA !!! -> {str(e)}")
             return Response({"error": f"Sistemsel bir hata: {str(e)}"}, status=500)
-
 class BulkAcademicReportView(APIView):
     """
     Akademisyen Paneli için toplu PDF raporu verisi sağlar.

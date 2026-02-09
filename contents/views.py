@@ -8,15 +8,17 @@ from django.utils import timezone
 from datetime import date, timedelta
 from rest_framework.permissions import IsAdminUser
 from django.db.models import Sum
-from django.conf import settings
 from django.shortcuts import get_object_or_404
-
 
 def init_vertex_ai():
     """Vertex AI bağlantısını her adımı loglayarak ve bellek dostu başlatır."""
     import time
-    start_time = time.time()
+    import gc
     
+    # 1. HAMLE: Başlamadan önce RAM'i zorla boşalt
+    gc.collect() 
+    
+    start_time = time.time()
     print("DEBUG: [STEP 1] init_vertex_ai fonksiyonu tetiklendi.")
 
     import json
@@ -30,48 +32,48 @@ def init_vertex_ai():
         import vertexai
         from vertexai.generative_models import GenerativeModel
         from google.oauth2 import service_account
-        print(f"DEBUG: [STEP 3] Vertex AI ve Google Auth kütüphaneleri başarıyla import edildi. Süre: {time.time() - start_time:.2f}s")
+        print(f"DEBUG: [STEP 3] SDK başarıyla import edildi. Süre: {time.time() - start_time:.2f}s")
     except Exception as e:
-        print(f"DEBUG: ❌ [STEP 3 - HATA] Kütüphaneler yüklenirken RAM yetmedi veya hata oluştu: {str(e)}")
+        print(f"DEBUG: ❌ [STEP 3 - HATA] RAM yetmedi: {str(e)}")
         raise e
 
+    # 2. HAMLE: Sabit değerler (Garantili bölge ve model)
     PROJECT_ID = "lmsproject-484210"
-    LOCATION = "us-central1"
+    LOCATION = "us-central1" # Localinde çalışan bölge kalsın
     
-    # Kimlik kontrolü
     creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON") or os.environ.get("GOOGLE_CREDENTIALS_JSON")
     
     try:
         if creds_json:
-            print(f"DEBUG: [STEP 4 - CANLI] GOOGLE_CREDENTIALS_JSON saptandı. Uzunluk: {len(creds_json)}")
+            print(f"DEBUG: [STEP 4 - CANLI] GOOGLE_CREDENTIALS_JSON saptandı.")
             creds_dict = json.loads(creds_json.strip())
             credentials = service_account.Credentials.from_service_account_info(creds_dict)
             
-            print(f"DEBUG: [STEP 5 - CANLI] vertexai.init başlatılıyor (Project: {PROJECT_ID})...")
+            print(f"DEBUG: [STEP 5 - CANLI] vertexai.init başlatılıyor...")
             vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
             
-            # Canlıda RAM %97 olduğu için mecburen Flash modeli
-            model_to_use = "gemini-1.5-flash" 
-            print(f"DEBUG: ✅ [STEP 6 - CANLI] Kimlik doğrulandı. Model: {model_to_use}")
+            # Canlıda CPU'yu yormayan en stabil sürüm
+            model_to_use = "gemini-2.5-pro" 
+            print(f"DEBUG: ✅ [STEP 6 - CANLI] Model belirlendi: {model_to_use}")
         else:
-            print("DEBUG: [STEP 4 - LOCAL] Ortam değişkeni yok, dosya sistemine bakılıyor.")
+            print("DEBUG: [STEP 4 - LOCAL] Dosya sistemine bakılıyor.")
             local_creds_path = os.path.join(settings.BASE_DIR, "google_creds.json")
             
             if os.path.exists(local_creds_path):
                 credentials = service_account.Credentials.from_service_account_file(local_creds_path)
                 vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
-                model_to_use = "gemini-2.5-pro"
-                print(f"DEBUG: ✅ [STEP 6 - LOCAL] Kimlik dosyası yüklendi: {local_creds_path}. Model: {model_to_use}")
+                model_to_use = "gemini-2.5-pro" # Localde de stabil sürüm
+                print(f"DEBUG: ✅ [STEP 6 - LOCAL] Model: {model_to_use}")
             else:
                 vertexai.init(project=PROJECT_ID, location=LOCATION)
-                model_to_use = "gemini-1.5-flash"
-                print("DEBUG: ⚠️ [STEP 6 - UYARI] Kimlik yok, varsayılan ADC ile devam ediliyor.")
+                model_to_use = "gemini-2.5-pro"
+                print("DEBUG: ⚠️ [STEP 6 - UYARI] Varsayılan ADC.")
 
-        # Model objesini oluşturma
+        # 3. HAMLE: Model nesnesini oluştururken sistem talimatını kısa tutalım (CPU için)
         print(f"DEBUG: [STEP 7] GenerativeModel nesnesi oluşturuluyor: {model_to_use}")
         model_obj = GenerativeModel(
             model_name=model_to_use,
-            system_instruction="Sen BÜ-LMS akıllı eğitim asistanısın. Öğrencilere akademik rehberlik sağlayan bir mentörsün."
+            system_instruction="Sen BÜ-LMS mentörü olarak öğrencilere kısa ve öz akademik analizler sunan bir asistansın."
         )
         
         total_duration = time.time() - start_time
@@ -81,6 +83,7 @@ def init_vertex_ai():
     except Exception as e:
         print(f"DEBUG: ❌ [STEP 9 - KRİTİK HATA] Akış sırasında hata: {str(e)}")
         raise e
+    
 class WeeklyContentView(APIView):
     permission_classes = [IsAuthenticated]
 

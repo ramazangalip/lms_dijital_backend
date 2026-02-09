@@ -681,3 +681,4 @@ class BulkAcademicReportView(APIView):
             })
 
         return Response(report_data, status=status.HTTP_200_OK)
+ 

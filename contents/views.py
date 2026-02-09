@@ -8,7 +8,6 @@ from django.utils import timezone
 from datetime import date, timedelta
 from rest_framework.permissions import IsAdminUser
 from django.db.models import Sum
-from django.conf import settings
 from django.shortcuts import get_object_or_404
 
 

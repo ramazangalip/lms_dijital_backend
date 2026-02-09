@@ -12,73 +12,75 @@ from django.conf import settings
 from django.shortcuts import get_object_or_404
 
 
-# --- YARDIMCI FONKSİYONLAR ---
-
-# views.py başındaki importları ve init_vertex_ai kısmını şu şekilde güncelleyin:
 def init_vertex_ai():
-    import google as genai
-    from google.cloud import aiplatform
-    import requests
-    from google.auth import default
-    from google.auth.transport.requests import Request as AuthRequest
-    import vertexai
-    from vertexai.generative_models import GenerativeModel
-    from google.oauth2 import service_account
-    import os
-    import json
-    """Vertex AI bağlantısını bellek dostu ve hatasız başlatır."""
-    # Bellek Boşaltma Hamlesi: Ağır kütüphaneleri sadece ihtiyaç anında yükle
-    import vertexai
-    from vertexai.generative_models import GenerativeModel
-    from google.oauth2 import service_account
+    """Vertex AI bağlantısını her adımı loglayarak ve bellek dostu başlatır."""
+    import time
+    start_time = time.time()
+    
+    print("DEBUG: [STEP 1] init_vertex_ai fonksiyonu tetiklendi.")
+
     import json
     import os
     from django.conf import settings
+    
+    print("DEBUG: [STEP 2] Temel kütüphaneler yüklendi. Ağır kütüphane yüklemesi başlıyor...")
+
+    try:
+        # Lazy Loading: RAM tasarrufu için kritik aşama
+        import vertexai
+        from vertexai.generative_models import GenerativeModel
+        from google.oauth2 import service_account
+        print(f"DEBUG: [STEP 3] Vertex AI ve Google Auth kütüphaneleri başarıyla import edildi. Süre: {time.time() - start_time:.2f}s")
+    except Exception as e:
+        print(f"DEBUG: ❌ [STEP 3 - HATA] Kütüphaneler yüklenirken RAM yetmedi veya hata oluştu: {str(e)}")
+        raise e
 
     PROJECT_ID = "lmsproject-484210"
     LOCATION = "us-central1"
     
-    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    # Kimlik kontrolü
+    creds_json = os.getenv("GOOGLE_CREDENTIALS_JSON") or os.environ.get("GOOGLE_CREDENTIALS_JSON")
     
     try:
-        # --- KİMLİK DOĞRULAMA (AUTH) ---
         if creds_json:
-            # Canlı Ortam (Koyeb)
+            print(f"DEBUG: [STEP 4 - CANLI] GOOGLE_CREDENTIALS_JSON saptandı. Uzunluk: {len(creds_json)}")
             creds_dict = json.loads(creds_json.strip())
             credentials = service_account.Credentials.from_service_account_info(creds_dict)
+            
+            print(f"DEBUG: [STEP 5 - CANLI] vertexai.init başlatılıyor (Project: {PROJECT_ID})...")
             vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
             
-            # CANLI DA HAFIZAYI KORUMAK İÇİN FLASH MODELİ
-            # Chat çalışıp Analiz çalışmıyorsa sebebi 2.5-pro'nun RAM'i bitirmesidir.
+            # Canlıda RAM %97 olduğu için mecburen Flash modeli
             model_to_use = "gemini-1.5-flash" 
-            print("DEBUG: ✅ Canlı ortamda Gemini 1.5 Flash başlatılıyor (RAM Dostu).")
+            print(f"DEBUG: ✅ [STEP 6 - CANLI] Kimlik doğrulandı. Model: {model_to_use}")
         else:
-            # Local Ortam
+            print("DEBUG: [STEP 4 - LOCAL] Ortam değişkeni yok, dosya sistemine bakılıyor.")
             local_creds_path = os.path.join(settings.BASE_DIR, "google_creds.json")
+            
             if os.path.exists(local_creds_path):
                 credentials = service_account.Credentials.from_service_account_file(local_creds_path)
                 vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
-                
-                # LOCALDE ÇALIŞAN MODELİNİ KORUYORUZ
                 model_to_use = "gemini-2.5-pro"
-                print(f"DEBUG: ✅ Localde {model_to_use} başlatılıyor.")
+                print(f"DEBUG: ✅ [STEP 6 - LOCAL] Kimlik dosyası yüklendi: {local_creds_path}. Model: {model_to_use}")
             else:
                 vertexai.init(project=PROJECT_ID, location=LOCATION)
                 model_to_use = "gemini-1.5-flash"
-                print("DEBUG: ⚠️ Kimlik yok, varsayılan model deneniyor.")
+                print("DEBUG: ⚠️ [STEP 6 - UYARI] Kimlik yok, varsayılan ADC ile devam ediliyor.")
 
-        # --- MODEL DÖNDÜRME ---
-        return GenerativeModel(
+        # Model objesini oluşturma
+        print(f"DEBUG: [STEP 7] GenerativeModel nesnesi oluşturuluyor: {model_to_use}")
+        model_obj = GenerativeModel(
             model_name=model_to_use,
             system_instruction="Sen BÜ-LMS akıllı eğitim asistanısın. Öğrencilere akademik rehberlik sağlayan bir mentörsün."
         )
         
+        total_duration = time.time() - start_time
+        print(f"DEBUG: [STEP 8] init_vertex_ai başarıyla tamamlandı. Toplam süre: {total_duration:.2f}s")
+        return model_obj
+        
     except Exception as e:
-        print(f"DEBUG: ❌ Vertex AI Başlatma Hatası: {str(e)}")
+        print(f"DEBUG: ❌ [STEP 9 - KRİTİK HATA] Akış sırasında hata: {str(e)}")
         raise e
-
-# --- ANA İÇERİK VIEW ---
-
 class WeeklyContentView(APIView):
     permission_classes = [IsAuthenticated]
 

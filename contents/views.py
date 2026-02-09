@@ -495,62 +495,91 @@ class QuizAIAnalysisView(APIView):
         print(f"DEBUG: [QuizAIAnalysisView] Analiz İsteği Geldi. ID: {attempt_id}")
         
         try:
-            # 1. Sınav denemesini bul
-            try:
-                attempt = StudentQuizAttempt.objects.get(id=str(attempt_id), student=request.user)
-                print(f"DEBUG: Sınav Kaydı Bulundu -> {attempt.quiz.title}")
-            except StudentQuizAttempt.DoesNotExist:
-                print(f"DEBUG: !!! HATA: ID {attempt_id} ile eşleşen sınav kaydı BULUNAMADI !!!")
-                return Response({"error": "Sınav verisi bulunamadı. Lütfen sayfayı yenileyip tekrar deneyin."}, status=404)
-
-            # 2. Yanlış cevapları ve analiz detaylarını hazırla
+            # 1. Sınav verilerini veritabanından çek (Hatasız)
+            attempt = get_object_or_404(StudentQuizAttempt, id=str(attempt_id), student=request.user)
             wrong_answers = StudentAnswer.objects.filter(attempt=attempt, is_correct=False).select_related('question')
-            user_name = request.user.first_name if request.user.first_name else request.user.username
+            user_name = request.user.first_name or request.user.username
             
             details = ""
             for ans in wrong_answers:
                 correct_opt = QuizOption.objects.filter(question=ans.question, is_correct=True).first()
                 details += (f"Soru: {ans.question.question_text}\n"
-                           f"Öğrencinin Yanlış Cevabı: {ans.selected_option.option_text}\n"
+                           f"Öğrencinin Yanlışı: {ans.selected_option.option_text}\n"
                            f"Doğru Cevap: {correct_opt.option_text if correct_opt else '?'}\n\n")
 
-            # 3. AI Prompt ve İçerik Üretimi
             prompt = (
                 f"Bir eğitim danışmanı olarak, öğrencim {user_name} için '{attempt.quiz.title}' sınavındaki "
                 f"%{attempt.score} başarısını analiz et. Hataları:\n{details}\n"
-                f"Lütfen mesaja direkt '{user_name}, merhaba!' veya 'Selam {user_name}!' gibi samimi bir girişle başla. "
-                f"Hatalarını nazikçe açıkla, moral ver ve gelişim için ne yapması gerektiğini söyle."
+                f"Lütfen samimi bir girişle başla, hataları açıkla ve gelişim tavsiyesi sun."
             )
             
-            print("DEBUG: Vertex AI İsteği Gönderiliyor...")
-            model = init_vertex_ai()
-            ai_response = model.generate_content(prompt)
+            # --- KRİTİK: CANLIYI KURTARAN REST ÇAĞRISI ---
+            # init_vertex_ai'dan sadece token alıyoruz (SDK yüklemiyoruz)
+            config = init_vertex_ai() 
             
-            ai_feedback_text = ""
-            if not ai_response or not ai_response.text:
-                print("DEBUG: AI Modelinden boş yanıt döndü.")
-                ai_feedback_text = "Tebrikler, sınavı tamamladın! Şu an detaylı analiz oluşturulamıyor ama başarılarının devamını dilerim."
+            # Google API URL'si
+            url = f"https://us-central1-aiplatform.googleapis.com/v1/projects/lmsproject-484210/locations/us-central1/publishers/google/models/gemini-2.5-pro:generateContent"
+            
+            # Kimlik bilgilerini manuel (REST) gönderiyoruz
+            # Not: credentials.token'a erişmek için init_vertex_ai'ın içindeki 
+            # vertexai.init kısmından sonra bir credentials objesi döndüğünden emin olmalıyız.
+            
+            # Eğer init_vertex_ai sadece GenerativeModel dönüyorsa, token'ı buradan alalım:
+            creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+            if creds_json:
+                creds_dict = json.loads(creds_json)
+                credentials = service_account.Credentials.from_service_account_info(creds_dict, scopes=['https://www.googleapis.com/auth/cloud-platform'])
             else:
-                ai_feedback_text = ai_response.text
+                local_path = os.path.join(settings.BASE_DIR, "google_creds.json")
+                credentials = service_account.Credentials.from_service_account_file(local_path, scopes=['https://www.googleapis.com/auth/cloud-platform'])
+            
+            auth_req = AuthRequest()
+            credentials.refresh(auth_req)
+            
+            headers = {
+                "Authorization": f"Bearer {credentials.token}",
+                "Content-Type": "application/json; charset=utf-8"
+            }
+            
+            payload = {
+                "contents": [
+                    {
+                        "role": "user", # KRİTİK EKSİK BURASIYDI!
+                        "parts": [
+                            {"text": prompt}
+                        ]
+                    }
+                ],
+                "generationConfig": {
+                    "maxOutputTokens": 4096,
+                    "temperature": 0.7,
+                    "top_p": 0.95
+                }
+            }
 
-            # --- 4. KRİTİK: ROUND 2 TETİKLEME MANTIĞI ---
-            # Öğrenci analiz butonuna tıkladığı an Round 2 yetkisi verilir
+            # İstek atılıyor - Timeout 90 saniye (Canlıda kilitlenmeyi önler)
+            response = requests.post(url, headers=headers, json=payload, timeout=90)
+            res_json = response.json()
+
+            ai_feedback_text = ""
+            if 'candidates' in res_json:
+                parts = res_json['candidates'][0]['content']['parts']
+                ai_feedback_text = "".join([p.get('text', '') for p in parts])
+            else:
+                print(f"DEBUG: API Boş Döndü -> {res_json}")
+                ai_feedback_text = "Sınavı tamamladın! Analiz şu an oluşturulamadı, başarılar dilerim."
+
+            # --- ROUND 2 MANTIĞI ---
             weekly_content = attempt.quiz.material.parent_content
             progress = StudentProgress.objects.get(student=request.user, weekly_content=weekly_content)
-            
             is_upgraded = False
-            # Eğer öğrenci 1. turdaysa ve en az 1 yanlışı varsa 2. turu başlat
             if attempt.wrong_answers > 0 and progress.current_attempt_round == 1:
                 progress.current_attempt_round = 2
-                progress.completion_percentage = 0 # 2. tur için yüzeyi sıfırla
-                progress.is_completed = False      # Tekrar bitirmesi gereksin
+                progress.completion_percentage = 0
+                progress.is_completed = False
                 progress.save()
                 is_upgraded = True
-                print(f"DEBUG: {user_name} için Round 2 aktif edildi. İlerleme sıfırlandı.")
 
-            print("DEBUG: Analiz ve Tur Güncellemesi Başarılı.")
-            print("="*60 + "\n")
-            
             return Response({
                 "ai_feedback": ai_feedback_text,
                 "round_upgraded": is_upgraded,
@@ -558,8 +587,8 @@ class QuizAIAnalysisView(APIView):
             }, status=200)
             
         except Exception as e: 
-            print(f"DEBUG: !!! BEKLENMEDİK HATA !!! -> {str(e)}")
-            return Response({"error": f"Sistemsel bir hata oluştu: {str(e)}"}, status=500)
+            print(f"DEBUG: !!! Analiz Hatası !!! -> {str(e)}")
+            return Response({"error": "Analiz şu an teknik bir nedenle yapılamadı."}, status=500)
 
 class BulkAcademicReportView(APIView):
     """

@@ -18,6 +18,7 @@ class WeeklyContent(models.Model):
 
     intro_title = models.CharField(max_length=255, default="Genel Tanıtım", verbose_name="Tanıtım Başlığı")
     intro_video_url = models.URLField(blank=True, null=True, verbose_name="Tanıtım Videosu (Embed Link)")
+    intro_description = models.TextField(blank=True, null=True, verbose_name="Tanıtım Metni/Açıklaması")
 
     class Meta:
         verbose_name = "Haftalık İçerik"

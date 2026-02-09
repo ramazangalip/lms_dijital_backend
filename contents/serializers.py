@@ -61,8 +61,8 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
         model = WeeklyContent
         fields = [
             'id', 'week_number', 'title', 'description', 
-            'intro_title', 'intro_video_url', 'release_date',
-            'is_locked', 'lock_reason',
+            'intro_title', 'intro_video_url', 'intro_description',  # YENİ ALAN EKLENDİ
+            'release_date', 'is_locked', 'lock_reason',
             'is_intro_watched', 'materials', 'flashcards', 'progress', 'is_completed'
         ]
 
@@ -142,6 +142,7 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
         
         i_title = validated_data.get('intro_title', 'Genel Tanıtım')
         i_url = validated_data.get('intro_video_url', '')
+        i_desc = validated_data.get('intro_description', '') # YENİ ALAN ALINDI
         r_date = validated_data.get('release_date', None)
 
         content, _ = WeeklyContent.objects.update_or_create(
@@ -151,13 +152,16 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
                 'description': validated_data.get('description'),
                 'intro_title': i_title,
                 'intro_video_url': i_url,
+                'intro_description': i_desc, # YENİ ALAN KAYDEDİLDİ
                 'release_date': r_date,
             }
         )
 
+        # Hafta 1 ise intro bilgilerini ana kilit olarak güncelle
         if w_num == 1:
             content.intro_title = i_title
             content.intro_video_url = i_url
+            content.intro_description = i_desc # YENİ ALAN GÜNCELLENDİ
             content.save()
 
         keep_mat_ids = []
@@ -236,7 +240,6 @@ class StudentAnalyticsSerializer(serializers.ModelSerializer):
 
     class Meta:
         model = User
-        # department ve total_points alanlarını ekledik
         fields = [
             'id', 'first_name', 'last_name', 'email', 
             'department', 'department_name', 'total_points', 
@@ -254,7 +257,6 @@ class StudentAnalyticsSerializer(serializers.ModelSerializer):
             return 0
             
         # 2. ÖNEMLİ: Her hafta için sadece AKTİF TURDAKİ tamamlanmaları say
-        # Öğrencinin tüm haftalardaki StudentProgress kayıtlarını (aktif turlarıyla beraber) alıyoruz
         progresses = StudentProgress.objects.filter(student=obj)
         
         current_completed_count = 0
@@ -292,11 +294,10 @@ class StudentAnalyticsSerializer(serializers.ModelSerializer):
             
             progress_obj = StudentProgress.objects.filter(student=obj, weekly_content=week).first()
 
-            # --- YENİ: MATERYAL BAZLI DETAYLI SÜRE ANALİZİ ---
+            # --- MATERYAL BAZLI DETAYLI SÜRE ANALİZİ ---
             material_details = []
             mats = week.materials.all()
             for m in mats:
-                # Bu materyalde harcanan toplam süre (Round 1 + Round 2 birleşik)
                 m_sec = TimeTracking.objects.filter(
                     student=obj, 
                     material=m
@@ -308,16 +309,40 @@ class StudentAnalyticsSerializer(serializers.ModelSerializer):
                     "duration_seconds": m_sec
                 })
 
+            # --- YENİ: YAPAY ZEKA SORULARINI ÇEK ---
+            ai_questions = StudentQuestion.objects.filter(
+                student=obj, 
+                weekly_content=week
+            ).values_list('question_text', flat=True)
+
+            # --- YENİ: TEST CEVAP ANALİZİNİ ÇEK ---
+            # En güncel denemeyi (Tur 1 veya Varsa Tur 2) temel alarak detayları çekiyoruz
+            quiz_results = []
+            last_attempt = StudentQuizAttempt.objects.filter(
+                student=obj, 
+                quiz__material__parent_content=week
+            ).order_by('-completed_at').first()
+
+            if last_attempt:
+                answers = StudentAnswer.objects.filter(attempt=last_attempt)
+                for ans in answers:
+                    # Bu sorunun doğru şıkkını bul
+                    correct_opt = QuizOption.objects.filter(question=ans.question, is_correct=True).first()
+                    quiz_results.append({
+                        "question_text": ans.question.question_text,
+                        "selected_option": ans.selected_option.option_text,
+                        "correct_option": correct_opt.option_text if correct_opt else "Belirtilmemiş",
+                        "is_correct": ans.is_correct
+                    })
+
             breakdown.append({
                 "week_number": week.week_number,
                 "progress": progress_obj.completion_percentage if progress_obj else 0,
-                
-                # Karne modalındaki "week.duration" için toplam saniye
                 "duration": total_sec_1 + total_sec_2, 
                 "duration_seconds": total_sec_1 + total_sec_2,
-                
-                # Materyal bazlı liste (Frontend'de map ile dönebilirsin)
                 "material_details": material_details,
+                "questions": list(ai_questions),  # AI soruları listesi
+                "quiz_results": quiz_results,      # Test cevap detayları
                 
                 # Tur 1 Detayları
                 "duration_1": total_sec_1,
@@ -330,8 +355,6 @@ class StudentAnalyticsSerializer(serializers.ModelSerializer):
                 "score_2": quiz_2.score if quiz_2 else 0,
                 "correct_2": quiz_2.correct_answers if quiz_2 else 0,
                 "wrong_2": quiz_2.wrong_answers if quiz_2 else 0,
-                
-             
             })
             
         return breakdown

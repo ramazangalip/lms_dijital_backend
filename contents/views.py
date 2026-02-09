@@ -58,15 +58,20 @@ class WeeklyContentView(APIView):
         if week_number:
             content = WeeklyContent.objects.filter(week_number=week_number).first()
             if content:
+                # 1. haftayı buluyoruz (intro bilgilerini oradan kopyalamak için)
                 week_one = WeeklyContent.objects.filter(week_number=1).first()
+                
                 # context={'request': request} eklemek Serializer'daki is_locked metodunun 
                 # kullanıcıyı (request.user) tanıması için ZORUNLUDUR.
                 serializer = WeeklyContentSerializer(content, context={'request': request})
                 data = serializer.data
                 
+                # Eğer 1. hafta varsa, güncel intro bilgilerini (URL, Başlık, Metin) her hafta talebine ekle
                 if week_one:
                     data['intro_video_url'] = week_one.intro_video_url
                     data['intro_title'] = week_one.intro_title
+                    data['intro_description'] = week_one.intro_description # YENİ: Metin desteği eklendi
+                
                 return Response(data, status=status.HTTP_200_OK)
             return Response({"detail": "Bu hafta henüz boş."}, status=status.HTTP_404_NOT_FOUND)
             
@@ -79,18 +84,21 @@ class WeeklyContentView(APIView):
         if not getattr(request.user, 'is_teacher', False):
             return Response({"error": "İçerik ekleme yetkiniz bulunmamaktadır."}, status=status.HTTP_403_FORBIDDEN)
 
+        # Frontend'den gelen verileri yakala
         intro_url = request.data.get('intro_video_url')
         intro_title = request.data.get('intro_title')
-        # release_date artık request.data içinde gelecek, Serializer bunu otomatik karşılayacak
+        intro_desc = request.data.get('intro_description') # YENİ: Metin bilgisini al
 
         serializer = WeeklyContentSerializer(data=request.data, context={'request': request})
         if serializer.is_valid():
             content_instance = serializer.save()
             
-            if intro_url:
+            # Eğer bir intro bilgisi gönderilmişse, sistem genelinde 1. haftanın intro alanlarını güncelle
+            if intro_url or intro_desc:
                 WeeklyContent.objects.filter(week_number=1).update(
                     intro_video_url=intro_url,
-                    intro_title=intro_title if intro_title else "Genel Tanıtım"
+                    intro_title=intro_title if intro_title else "Genel Tanıtım",
+                    intro_description=intro_desc # YENİ: Veritabanına metni kaydet
                 )
             
             return Response(serializer.data, status=status.HTTP_201_CREATED)
@@ -319,24 +327,30 @@ class AIChatView(APIView):
 
             if response and response.candidates:
                 try:
-                 
                     ai_response_text = "".join([part.text for part in response.candidates[0].content.parts])
                 except (AttributeError, IndexError, Exception):
-               
                     ai_response_text = "Üzgünüm, bu içeriği şu an işleyemiyorum."
             else:
                 ai_response_text = "Üzgünüm, bu soruya şu an yanıt veremiyorum."
 
+            # --- KAYIT MANTIĞI GÜNCELLEMESİ ---
             if week_id:
                 try:
+                    # Gelen week_id'nin veritabanında gerçekten olup olmadığını kontrol et
                     weekly_content = WeeklyContent.objects.get(id=week_id)
+                    
+                    # Öğrencinin sorusunu veritabanına kaydet
                     StudentQuestion.objects.create(
                         student=request.user, 
                         weekly_content=weekly_content, 
                         question_text=user_message
                     )
-                except: 
-                    pass
+                    print(f"DEBUG: Soru başarıyla kaydedildi. Hafta ID: {week_id}")
+                except WeeklyContent.DoesNotExist:
+                    print(f"DEBUG: HATA! Soru kaydedilemedi çünkü Hafta ID {week_id} bulunamadı.")
+                except Exception as e:
+                    print(f"DEBUG: Soru kaydı sırasında teknik hata: {str(e)}")
+            # ---------------------------------
                 
             return Response({"response": ai_response_text}, status=200)
             

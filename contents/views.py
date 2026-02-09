@@ -10,70 +10,71 @@ from rest_framework.permissions import IsAdminUser
 from django.db.models import Sum
 from django.conf import settings
 from django.shortcuts import get_object_or_404
-import google as genai
-from google.cloud import aiplatform
-import requests
-from google.auth import default
-from google.auth.transport.requests import Request as AuthRequest
-import vertexai
-from vertexai.generative_models import GenerativeModel
-from google.oauth2 import service_account
-import os
-import json
+
 
 # --- YARDIMCI FONKSİYONLAR ---
 
 # views.py başındaki importları ve init_vertex_ai kısmını şu şekilde güncelleyin:
-
 def init_vertex_ai():
-    """Vertex AI bağlantısını hem local hem Koyeb için ekstra debug logları ile başlatır."""
+    import google as genai
+    from google.cloud import aiplatform
+    import requests
+    from google.auth import default
+    from google.auth.transport.requests import Request as AuthRequest
+    import vertexai
+    from vertexai.generative_models import GenerativeModel
+    from google.oauth2 import service_account
+    import os
+    import json
+    """Vertex AI bağlantısını bellek dostu ve hatasız başlatır."""
+    # Bellek Boşaltma Hamlesi: Ağır kütüphaneleri sadece ihtiyaç anında yükle
+    import vertexai
+    from vertexai.generative_models import GenerativeModel
+    from google.oauth2 import service_account
+    import json
+    import os
+    from django.conf import settings
+
     PROJECT_ID = "lmsproject-484210"
     LOCATION = "us-central1"
     
-    # 1. Ortam değişkenini kontrol et
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     
     try:
+        # --- KİMLİK DOĞRULAMA (AUTH) ---
         if creds_json:
-            # CANLI ORTAM DEBUG LOGLARI
-            print(f"DEBUG: [Canlı] GOOGLE_CREDENTIALS_JSON bulundu. Karakter uzunluğu: {len(creds_json)}")
+            # Canlı Ortam (Koyeb)
+            creds_dict = json.loads(creds_json.strip())
+            credentials = service_account.Credentials.from_service_account_info(creds_dict)
+            vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
             
-            try:
-                # JSON temizleme ve yükleme
-                cleaned_json = creds_json.strip()
-                creds_dict = json.loads(cleaned_json)
-                print(f"DEBUG: [Canlı] JSON başarıyla parse edildi. Project ID: {creds_dict.get('project_id')}")
-                
-                credentials = service_account.Credentials.from_service_account_info(creds_dict)
-                vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
-                print("DEBUG: ✅ [Canlı] Vertex AI kimlik bilgileri JSON değişkeninden başarıyla yüklendi.")
-            
-            except json.JSONDecodeError as je:
-                print(f"DEBUG: ❌ [Canlı] JSON Parse Hatası! Metin geçerli bir JSON formatında değil: {str(je)}")
-                raise je
+            # CANLI DA HAFIZAYI KORUMAK İÇİN FLASH MODELİ
+            # Chat çalışıp Analiz çalışmıyorsa sebebi 2.5-pro'nun RAM'i bitirmesidir.
+            model_to_use = "gemini-1.5-flash" 
+            print("DEBUG: ✅ Canlı ortamda Gemini 1.5 Flash başlatılıyor (RAM Dostu).")
         else:
-            # 2. LOCAL İÇİN: Eğer ortam değişkeni yoksa dizindeki dosyayı ara
-            print("DEBUG: [Sistem] GOOGLE_CREDENTIALS_JSON bulunamadı, local dosya aranıyor...")
+            # Local Ortam
             local_creds_path = os.path.join(settings.BASE_DIR, "google_creds.json")
-            
             if os.path.exists(local_creds_path):
                 credentials = service_account.Credentials.from_service_account_file(local_creds_path)
                 vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
-                print(f"DEBUG: ✅ [Local] Kimlik dosyası yüklendi: {local_creds_path}")
+                
+                # LOCALDE ÇALIŞAN MODELİNİ KORUYORUZ
+                model_to_use = "gemini-2.5-pro"
+                print(f"DEBUG: ✅ Localde {model_to_use} başlatılıyor.")
             else:
                 vertexai.init(project=PROJECT_ID, location=LOCATION)
-                print("DEBUG: ⚠️ [Uyarı] Hiçbir kimlik kaynağı bulunamadı, varsayılan ADC deneniyor.")
-        
-        # 3. MODEL BAŞLATMA
-        # Localde çalışan sürümü (gemini-2.5-pro) koruyoruz.
+                model_to_use = "gemini-1.5-flash"
+                print("DEBUG: ⚠️ Kimlik yok, varsayılan model deneniyor.")
+
+        # --- MODEL DÖNDÜRME ---
         return GenerativeModel(
-            model_name="gemini-2.5-pro",
-            system_instruction="Sen BÜ-LMS akıllı eğitim asistanısın. Öğrencilere her konuda yardımcı olan samimi bir rehbersin."
+            model_name=model_to_use,
+            system_instruction="Sen BÜ-LMS akıllı eğitim asistanısın. Öğrencilere akademik rehberlik sağlayan bir mentörsün."
         )
         
     except Exception as e:
-        print(f"DEBUG: ❌ [Kritik] Vertex AI Başlatma Hatası: {str(e)}")
-        # Hatanın detaylarını görmek için traceback de basılabilir
+        print(f"DEBUG: ❌ Vertex AI Başlatma Hatası: {str(e)}")
         raise e
 
 # --- ANA İÇERİK VIEW ---

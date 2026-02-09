@@ -83,6 +83,7 @@ def init_vertex_ai():
     except Exception as e:
         print(f"DEBUG: ❌ [STEP 9 - KRİTİK HATA] Akış sırasında hata: {str(e)}")
         raise e
+    
 class WeeklyContentView(APIView):
     permission_classes = [IsAuthenticated]
 

@@ -69,7 +69,7 @@ class Material(models.Model):
     title = models.CharField(max_length=200, verbose_name="Materyal Başlığı")
     
    
-    point_value = models.PositiveIntegerField(default=0, verbose_name="Tamamlama Puanı")
+    point_value = models.PositiveIntegerField(default=1, verbose_name="Tamamlama Puanı")
 
     def __str__(self):
         return f"{self.get_content_type_display()} - {self.title}"

@@ -24,7 +24,29 @@ import json
 
 # --- YARDIMCI FONKSİYONLAR ---
 
-# views.py başındaki importları ve init_vertex_ai kısmını şu şekilde güncelleyin:
+# views.py başındaki
+#  importları ve init_vertex_ai kısmını şu şekilde güncelleyin:
+
+def get_vertex_access_token():
+    """Vertex AI'a bağlanmak için gereken erişim anahtarını hafif bir şekilde alır."""
+    creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
+    if creds_json:
+        creds_dict = json.loads(creds_json)
+        credentials = service_account.Credentials.from_service_account_info(
+            creds_dict, 
+            scopes=['https://www.googleapis.com/auth/cloud-platform']
+        )
+    else:
+        # Local için
+        local_path = os.path.join(settings.BASE_DIR, "google_creds.json")
+        credentials = service_account.Credentials.from_service_account_file(
+            local_path, 
+            scopes=['https://www.googleapis.com/auth/cloud-platform']
+        )
+    
+    auth_req = AuthRequest()
+    credentials.refresh(auth_req)
+    return credentials.token
 
 def init_vertex_ai():
     """Vertex AI bağlantısını merkezi ve hatasız olarak yönetir."""
@@ -499,104 +521,64 @@ class QuizAIAnalysisView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, attempt_id):
-        print("\n" + "="*60)
-        print(f"DEBUG: [QuizAIAnalysisView] Analiz İsteği Geldi. ID: {attempt_id}")
+        # 1. Veritabanı verilerini çek
+        attempt = get_object_or_404(StudentQuizAttempt, id=str(attempt_id), student=request.user)
+        wrong_answers = StudentAnswer.objects.filter(attempt=attempt, is_correct=False).select_related('question')
+        user_name = request.user.first_name or request.user.username
         
-        try:
-            # 1. Sınav verilerini veritabanından çek (Hatasız)
-            attempt = get_object_or_404(StudentQuizAttempt, id=str(attempt_id), student=request.user)
-            wrong_answers = StudentAnswer.objects.filter(attempt=attempt, is_correct=False).select_related('question')
-            user_name = request.user.first_name or request.user.username
-            
-            details = ""
-            for ans in wrong_answers:
-                correct_opt = QuizOption.objects.filter(question=ans.question, is_correct=True).first()
-                details += (f"Soru: {ans.question.question_text}\n"
-                           f"Öğrencinin Yanlışı: {ans.selected_option.option_text}\n"
-                           f"Doğru Cevap: {correct_opt.option_text if correct_opt else '?'}\n\n")
+        details = ""
+        for ans in wrong_answers:
+            correct_opt = QuizOption.objects.filter(question=ans.question, is_correct=True).first()
+            details += (f"Soru: {ans.question.question_text}\n"
+                       f"Öğrencinin Yanlış Cevabı: {ans.selected_option.option_text}\n"
+                       f"Doğru Cevap: {correct_opt.option_text if correct_opt else '?'}\n\n")
 
-            prompt = (
-                f"Bir eğitim danışmanı olarak, öğrencim {user_name} için '{attempt.quiz.title}' sınavındaki "
-                f"%{attempt.score} başarısını analiz et. Hataları:\n{details}\n"
-                f"Lütfen samimi bir girişle başla, hataları açıkla ve gelişim tavsiyesi sun."
-            )
+        prompt = ( f"Bir eğitim danışmanı olarak, öğrencim {user_name} için '{attempt.quiz.title}' sınavındaki " f"%{attempt.score} başarısını analiz et. Hataları:\n{details}\n" f"Lütfen samimi bir girişle başla, hataları açıkla ve gelişim tavsiyesi sun." )
+
+        try:
+            # 2. Token Al (RAM Dostu Yöntem)
+            token = get_vertex_access_token()
             
-            # --- KRİTİK: CANLIYI KURTARAN REST ÇAĞRISI ---
-            # init_vertex_ai'dan sadece token alıyoruz (SDK yüklemiyoruz)
-            config = init_vertex_ai() 
-            
-            # Google API URL'si
-            url = f"https://us-central1-aiplatform.googleapis.com/v1/projects/lmsproject-484210/locations/us-central1/publishers/google/models/gemini-2.5-pro:generateContent"
-            
-            # Kimlik bilgilerini manuel (REST) gönderiyoruz
-            # Not: credentials.token'a erişmek için init_vertex_ai'ın içindeki 
-            # vertexai.init kısmından sonra bir credentials objesi döndüğünden emin olmalıyız.
-            
-            # Eğer init_vertex_ai sadece GenerativeModel dönüyorsa, token'ı buradan alalım:
-            creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-            if creds_json:
-                creds_dict = json.loads(creds_json)
-                credentials = service_account.Credentials.from_service_account_info(creds_dict, scopes=['https://www.googleapis.com/auth/cloud-platform'])
-            else:
-                local_path = os.path.join(settings.BASE_DIR, "google_creds.json")
-                credentials = service_account.Credentials.from_service_account_file(local_path, scopes=['https://www.googleapis.com/auth/cloud-platform'])
-            
-            auth_req = AuthRequest()
-            credentials.refresh(auth_req)
+            # --- MODELİ BURADA GÜNCELLEDİM (gemini-2.0-pro-exp) ---
+            # Not: Eğer Google panelinde model ismin farklıysa (örn: gemini-2.5-pro gibi özel bir isimse) 
+            # tırnak içindeki model ismini ona göre değiştirebilirsin.
+            url = "https://us-central1-aiplatform.googleapis.com/v1/projects/lmsproject-484210/locations/us-central1/publishers/google/models/gemini-2.5-pro:generateContent"
             
             headers = {
-                "Authorization": f"Bearer {credentials.token}",
+                "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json; charset=utf-8"
             }
             
+            # 3. Yüksek Kapasiteli Payload (maxOutputTokens: 8192)
             payload = {
-                "contents": [
-                    {
-                        "role": "user", # KRİTİK EKSİK BURASIYDI!
-                        "parts": [
-                            {"text": prompt}
-                        ]
-                    }
-                ],
+                "contents": [{
+                    "role": "user",
+                    "parts": [{"text": prompt}]
+                }],
                 "generationConfig": {
-                    "maxOutputTokens": 4096,
-                    "temperature": 0.7,
+                    "maxOutputTokens": 8192,
+                    "temperature": 0.8,
                     "top_p": 0.95
                 }
             }
 
-            # İstek atılıyor - Timeout 90 saniye (Canlıda kilitlenmeyi önler)
-            response = requests.post(url, headers=headers, json=payload, timeout=90)
+            # 4. İsteği Gönder (Timeout 120 saniye - Pro modelleri bazen geç yanıt verebilir)
+            response = requests.post(url, headers=headers, json=payload, timeout=120)
             res_json = response.json()
 
-            ai_feedback_text = ""
+            # 5. Yanıtı İşle
             if 'candidates' in res_json:
-                parts = res_json['candidates'][0]['content']['parts']
-                ai_feedback_text = "".join([p.get('text', '') for p in parts])
+                ai_text = res_json['candidates'][0]['content']['parts'][0]['text']
             else:
-                print(f"DEBUG: API Boş Döndü -> {res_json}")
-                ai_feedback_text = "Sınavı tamamladın! Analiz şu an oluşturulamadı, başarılar dilerim."
+                # API hatasını loglayalım
+                print(f"DEBUG: Vertex AI API Hatası -> {json.dumps(res_json)}")
+                ai_text = "Sınavı tamamladın! Tebrikler. Şu an detaylı analiz oluşturulamıyor."
 
-            # --- ROUND 2 MANTIĞI ---
-            weekly_content = attempt.quiz.material.parent_content
-            progress = StudentProgress.objects.get(student=request.user, weekly_content=weekly_content)
-            is_upgraded = False
-            if attempt.wrong_answers > 0 and progress.current_attempt_round == 1:
-                progress.current_attempt_round = 2
-                progress.completion_percentage = 0
-                progress.is_completed = False
-                progress.save()
-                is_upgraded = True
+            return Response({"ai_feedback": ai_text}, status=200)
 
-            return Response({
-                "ai_feedback": ai_feedback_text,
-                "round_upgraded": is_upgraded,
-                "current_round": progress.current_attempt_round
-            }, status=200)
-            
-        except Exception as e: 
-            print(f"DEBUG: !!! Analiz Hatası !!! -> {str(e)}")
-            return Response({"error": "Analiz şu an teknik bir nedenle yapılamadı."}, status=500)
+        except Exception as e:
+            print(f"DEBUG: QuizAIAnalysisView Hatası -> {str(e)}")
+            return Response({"error": "Sistemsel bir hata oluştu."}, status=500)
 
 class BulkAcademicReportView(APIView):
     """

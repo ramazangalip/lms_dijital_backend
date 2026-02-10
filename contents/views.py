@@ -556,7 +556,7 @@ class QuizAIAnalysisView(APIView):
                     "parts": [{"text": prompt}]
                 }],
                 "generationConfig": {
-                    "maxOutputTokens": 8192,
+                    "maxOutputTokens": 6000,
                     "temperature": 0.8,
                     "top_p": 0.95
                 }

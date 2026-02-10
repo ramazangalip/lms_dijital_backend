@@ -228,7 +228,15 @@ class CompleteMaterialView(APIView):
         new_points = 0
         # Puan Mantığı: Sadece 1. turda materyal bitirince puan verilir
         if created and current_round == 1:
-            new_points = material.point_value
+            # --- GÜNCELLEME BURADA ---
+            # Eğer puan 10 ise veya 0 ise (girilmemişse) 1 puan ver, değilse tanımlı puanı ver.
+            actual_point = material.point_value
+            if actual_point == 10 or actual_point == 0:
+                new_points = 1
+            else:
+                new_points = actual_point
+            # -------------------------
+
             request.user.total_points += new_points
             request.user.save()
             print(f"DEBUG: 1. Tur tamamlaması. {new_points} puan kazandı.")

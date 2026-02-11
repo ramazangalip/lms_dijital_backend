@@ -27,40 +27,39 @@ import json
 # views.py başındaki importları ve init_vertex_ai kısmını şu şekilde güncelleyin:
 
 def init_vertex_ai():
-    """Vertex AI bağlantısını merkezi ve hatasız olarak yönetir."""
+    """Vertex AI için sadece Erişim Token'ı hazırlar. RAM ve Süre dostudur."""
+    import os, json
+    from django.conf import settings
+    from google.oauth2 import service_account
+    import google.auth.transport.requests
+
     PROJECT_ID = "lmsproject-484210"
     LOCATION = "us-central1"
-    
-    # 1. Önce ortam değişkenini kontrol et (Canlı ortam/Koyeb için)
     creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
     
     try:
         if creds_json:
-            creds_dict = json.loads(creds_json)
-            credentials = service_account.Credentials.from_service_account_info(creds_dict)
-            vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=credentials)
-            print("DEBUG: Vertex AI kimlik bilgileri JSON değişkeninden yüklendi.")
+            creds_dict = json.loads(creds_json.strip())
+            credentials = service_account.Credentials.from_service_account_info(
+                creds_dict, scopes=['https://www.googleapis.com/auth/cloud-platform']
+            )
         else:
-            # 2. LOCAL İÇİN EKSTRA KONTROL: 
-            # Eğer ortam değişkeni yoksa, proje ana dizinindeki dosyayı direkt oku
-            # Dosya adının 'google_creds.json' olduğunu varsayıyorum, değilse ismini düzelt.
-            local_creds_path = os.path.join(settings.BASE_DIR, "google_creds.json")
-            
-            if os.path.exists(local_creds_path):
-                vertexai.init(project=PROJECT_ID, location=LOCATION, credentials=service_account.Credentials.from_service_account_file(local_creds_path))
-                print(f"DEBUG: Local kimlik dosyası yüklendi: {local_creds_path}")
-            else:
-                # 3. Hiçbiri yoksa varsayılanı dene
-                vertexai.init(project=PROJECT_ID, location=LOCATION)
-                print("DEBUG: !!! UYARI: Kimlik bilgisi bulunamadı, varsayılan ADC deneniyor !!!")
+            local_path = os.path.join(settings.BASE_DIR, "google_creds.json")
+            credentials = service_account.Credentials.from_service_account_file(
+                local_path, scopes=['https://www.googleapis.com/auth/cloud-platform']
+            )
+
+        auth_req = google.auth.transport.requests.Request()
+        credentials.refresh(auth_req)
         
- 
-        return GenerativeModel(
-            model_name="gemini-2.5-pro",
-            system_instruction="Sen BÜ-LMS akıllı eğitim asistanısın."
-        )
+        return {
+            "token": credentials.token,
+            "project_id": PROJECT_ID,
+            "location": LOCATION,
+            "model_id": "gemini-2.5-pro"
+        }
     except Exception as e:
-        print(f"DEBUG: Vertex AI Başlatma Hatası: {str(e)}")
+        print(f"DEBUG: Kimlik Hatası -> {str(e)}")
         raise e
 
 # --- ANA İÇERİK VIEW ---
@@ -340,46 +339,37 @@ class AIChatView(APIView):
     def post(self, request):
         user_message = request.data.get("message")
         week_id = request.data.get("weekly_content_id")
-        
-        if not user_message: 
-            return Response({"error": "Mesaj boş olamaz."}, status=400)
+        if not user_message: return Response({"error": "Mesaj boş."}, status=400)
 
         try:
-            model = init_vertex_ai()
-            response = model.generate_content(user_message)
+            config = init_vertex_ai()
+            url = f"https://{config['location']}-aiplatform.googleapis.com/v1/projects/{config['project_id']}/locations/{config['location']}/publishers/google/models/{config['model_id']}:generateContent"
+            
+            headers = {"Authorization": f"Bearer {config['token']}", "Content-Type": "application/json"}
+            payload = {
+                "contents": [{"role": "user", "parts": [{"text": user_message}]}],
+                "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.7}
+            }
 
-            if response and response.candidates:
-                try:
-                    ai_response_text = "".join([part.text for part in response.candidates[0].content.parts])
-                except (AttributeError, IndexError, Exception):
-                    ai_response_text = "Üzgünüm, bu içeriği şu an işleyemiyorum."
+            response = requests.post(url, headers=headers, json=payload, timeout=60)
+            res_json = response.json()
+
+            if 'candidates' in res_json:
+                parts = res_json['candidates'][0]['content']['parts']
+                ai_response_text = "".join([p.get('text', '') for p in parts])
             else:
-                ai_response_text = "Üzgünüm, bu soruya şu an yanıt veremiyorum."
+                ai_response_text = "Üzgünüm, şu an yanıt veremiyorum."
 
-            # --- KAYIT MANTIĞI GÜNCELLEMESİ ---
+            # Kayıt mantığı
             if week_id:
                 try:
-                    # Gelen week_id'nin veritabanında gerçekten olup olmadığını kontrol et
-                    weekly_content = WeeklyContent.objects.get(id=week_id)
-                    
-                    # Öğrencinin sorusunu veritabanına kaydet
-                    StudentQuestion.objects.create(
-                        student=request.user, 
-                        weekly_content=weekly_content, 
-                        question_text=user_message
-                    )
-                    print(f"DEBUG: Soru başarıyla kaydedildi. Hafta ID: {week_id}")
-                except WeeklyContent.DoesNotExist:
-                    print(f"DEBUG: HATA! Soru kaydedilemedi çünkü Hafta ID {week_id} bulunamadı.")
-                except Exception as e:
-                    print(f"DEBUG: Soru kaydı sırasında teknik hata: {str(e)}")
-            # ---------------------------------
+                    WeeklyContent.objects.filter(id=week_id).exists()
+                    StudentQuestion.objects.create(student=request.user, weekly_content_id=week_id, question_text=user_message)
+                except: pass
                 
             return Response({"response": ai_response_text}, status=200)
-            
-        except Exception as e: 
-            print(f"AI Chat Error Detailed: {str(e)}")
-            return Response({"response": "Şu an genel bilgi havuzuna erişim sağlanamıyor, lütfen birazdan tekrar deneyin."}, status=500)
+        except Exception as e:
+            return Response({"response": "Sistem yoğunluğu var."}, status=500)
 
 # --- QUIZ (SINAV) SİSTEMİ ---
 
@@ -499,104 +489,42 @@ class QuizAIAnalysisView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request, attempt_id):
-        print("\n" + "="*60)
-        print(f"DEBUG: [QuizAIAnalysisView] Analiz İsteği Geldi. ID: {attempt_id}")
-        
         try:
-            # 1. Sınav verilerini veritabanından çek (Hatasız)
             attempt = get_object_or_404(StudentQuizAttempt, id=str(attempt_id), student=request.user)
             wrong_answers = StudentAnswer.objects.filter(attempt=attempt, is_correct=False).select_related('question')
             user_name = request.user.first_name or request.user.username
             
-            details = ""
-            for ans in wrong_answers:
-                correct_opt = QuizOption.objects.filter(question=ans.question, is_correct=True).first()
-                details += (f"Soru: {ans.question.question_text}\n"
-                           f"Öğrencinin Yanlışı: {ans.selected_option.option_text}\n"
-                           f"Doğru Cevap: {correct_opt.option_text if correct_opt else '?'}\n\n")
+            details = "".join([f"Soru: {ans.question.question_text}\nYanlış: {ans.selected_option.option_text}\n\n" for ans in wrong_answers])
+            prompt = f"Eğitim danışmanı olarak {user_name} için %{attempt.score} başarıyı analiz et. Hatalar:\n{details}\nSamimi bir dille moral ver ve tavsiye sun."
 
-            prompt = (
-                f"Bir eğitim danışmanı olarak, öğrencim {user_name} için '{attempt.quiz.title}' sınavındaki "
-                f"%{attempt.score} başarısını analiz et. Hataları:\n{details}\n"
-                f"Lütfen samimi bir girişle başla, hataları açıkla ve gelişim tavsiyesi sun."
-            )
+            config = init_vertex_ai()
+            url = f"https://{config['location']}-aiplatform.googleapis.com/v1/projects/{config['project_id']}/locations/{config['location']}/publishers/google/models/{config['model_id']}:generateContent"
             
-            # --- KRİTİK: CANLIYI KURTARAN REST ÇAĞRISI ---
-            # init_vertex_ai'dan sadece token alıyoruz (SDK yüklemiyoruz)
-            config = init_vertex_ai() 
-            
-            # Google API URL'si
-            url = f"https://us-central1-aiplatform.googleapis.com/v1/projects/lmsproject-484210/locations/us-central1/publishers/google/models/gemini-2.5-pro:generateContent"
-            
-            # Kimlik bilgilerini manuel (REST) gönderiyoruz
-            # Not: credentials.token'a erişmek için init_vertex_ai'ın içindeki 
-            # vertexai.init kısmından sonra bir credentials objesi döndüğünden emin olmalıyız.
-            
-            # Eğer init_vertex_ai sadece GenerativeModel dönüyorsa, token'ı buradan alalım:
-            creds_json = os.environ.get("GOOGLE_CREDENTIALS_JSON")
-            if creds_json:
-                creds_dict = json.loads(creds_json)
-                credentials = service_account.Credentials.from_service_account_info(creds_dict, scopes=['https://www.googleapis.com/auth/cloud-platform'])
-            else:
-                local_path = os.path.join(settings.BASE_DIR, "google_creds.json")
-                credentials = service_account.Credentials.from_service_account_file(local_path, scopes=['https://www.googleapis.com/auth/cloud-platform'])
-            
-            auth_req = AuthRequest()
-            credentials.refresh(auth_req)
-            
-            headers = {
-                "Authorization": f"Bearer {credentials.token}",
-                "Content-Type": "application/json; charset=utf-8"
-            }
-            
+            headers = {"Authorization": f"Bearer {config['token']}", "Content-Type": "application/json"}
             payload = {
-                "contents": [
-                    {
-                        "role": "user", # KRİTİK EKSİK BURASIYDI!
-                        "parts": [
-                            {"text": prompt}
-                        ]
-                    }
-                ],
-                "generationConfig": {
-                    "maxOutputTokens": 4096,
-                    "temperature": 0.7,
-                    "top_p": 0.95
-                }
+                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                "generationConfig": {"maxOutputTokens": 4096, "temperature": 0.7}
             }
 
-            # İstek atılıyor - Timeout 90 saniye (Canlıda kilitlenmeyi önler)
-            response = requests.post(url, headers=headers, json=payload, timeout=90)
+            # Analiz uzun sürebileceği için timeout 110 saniye
+            response = requests.post(url, headers=headers, json=payload, timeout=110)
             res_json = response.json()
 
-            ai_feedback_text = ""
-            if 'candidates' in res_json:
-                parts = res_json['candidates'][0]['content']['parts']
-                ai_feedback_text = "".join([p.get('text', '') for p in parts])
-            else:
-                print(f"DEBUG: API Boş Döndü -> {res_json}")
-                ai_feedback_text = "Sınavı tamamladın! Analiz şu an oluşturulamadı, başarılar dilerim."
+            ai_feedback_text = "".join([p.get('text', '') for p in res_json['candidates'][0]['content']['parts']]) if 'candidates' in res_json else "Analiz şu an hazır değil."
 
-            # --- ROUND 2 MANTIĞI ---
+            # Round 2 Mantığı
             weekly_content = attempt.quiz.material.parent_content
             progress = StudentProgress.objects.get(student=request.user, weekly_content=weekly_content)
             is_upgraded = False
             if attempt.wrong_answers > 0 and progress.current_attempt_round == 1:
                 progress.current_attempt_round = 2
                 progress.completion_percentage = 0
-                progress.is_completed = False
                 progress.save()
                 is_upgraded = True
 
-            return Response({
-                "ai_feedback": ai_feedback_text,
-                "round_upgraded": is_upgraded,
-                "current_round": progress.current_attempt_round
-            }, status=200)
-            
-        except Exception as e: 
-            print(f"DEBUG: !!! Analiz Hatası !!! -> {str(e)}")
-            return Response({"error": "Analiz şu an teknik bir nedenle yapılamadı."}, status=500)
+            return Response({"ai_feedback": ai_feedback_text, "round_upgraded": is_upgraded, "current_round": progress.current_attempt_round}, status=200)
+        except Exception as e:
+            return Response({"error": "Sistemsel bir hata oluştu."}, status=500)
 
 class BulkAcademicReportView(APIView):
     """

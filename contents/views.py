@@ -495,7 +495,12 @@ class QuizAIAnalysisView(APIView):
             user_name = request.user.first_name or request.user.username
             
             details = "".join([f"Soru: {ans.question.question_text}\nYanlış: {ans.selected_option.option_text}\n\n" for ans in wrong_answers])
-            prompt = f"Eğitim danışmanı olarak {user_name} için %{attempt.score} başarıyı analiz et. Hatalar:\n{details}\nSamimi bir dille moral ver ve tavsiye sun."
+            prompt = (
+                f"Bir eğitim danışmanı olarak, öğrencim {user_name} için '{attempt.quiz.title}' sınavındaki "
+                f"%{attempt.score} başarısını analiz et. Hataları:\n{details}\n"
+                f"Lütfen mesaja direkt '{user_name}, merhaba!' veya 'Selam {user_name}!' gibi samimi bir girişle başla. "
+                f"Hatalarını nazikçe açıkla, moral ver ve gelişim için ne yapması gerektiğini söyle."
+            )
 
             config = init_vertex_ai()
             url = f"https://{config['location']}-aiplatform.googleapis.com/v1/projects/{config['project_id']}/locations/{config['location']}/publishers/google/models/{config['model_id']}:generateContent"

@@ -508,11 +508,11 @@ class QuizAIAnalysisView(APIView):
             headers = {"Authorization": f"Bearer {config['token']}", "Content-Type": "application/json"}
             payload = {
                 "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": {"maxOutputTokens": 4096, "temperature": 0.7}
+                "generationConfig": {"maxOutputTokens": 8192, "temperature": 0.7}
             }
 
-            # Analiz uzun sürebileceği için timeout 110 saniye
-            response = requests.post(url, headers=headers, json=payload, timeout=110)
+            # Analiz uzun sürebileceği için timeout 500 saniye
+            response = requests.post(url, headers=headers, json=payload, timeout=500)
             res_json = response.json()
 
             ai_feedback_text = "".join([p.get('text', '') for p in res_json['candidates'][0]['content']['parts']]) if 'candidates' in res_json else "Analiz şu an hazır değil."

@@ -1,1 +1,1 @@
-web: gunicorn lms.wsgi:application --workers 1 --threads 1 --timeout 120
+gunicorn lms.wsgi:application --bind 0.0.0.0:8000 --timeout 300

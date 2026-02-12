@@ -485,11 +485,18 @@ class QuizLastAttemptView(APIView):
                 "wrong_answers": attempt.wrong_answers 
             }, status=200)
 
+class PlainTextRenderer(BaseRenderer):
+    media_type = 'text/plain'
+    format = 'txt'
+    def render(self, data, accepted_media_type=None, renderer_context=None):
+        return data
+
 from django.http import StreamingHttpResponse
 import json
 
 class QuizAIAnalysisView(APIView):
     permission_classes = [IsAuthenticated]
+    renderer_classes = [PlainTextRenderer]
 
     def get(self, request, attempt_id):
         try:

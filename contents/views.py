@@ -22,6 +22,8 @@ from google.oauth2 import service_account
 import os
 import json
 from rest_framework.renderers import BaseRenderer
+from rest_framework.authentication import TokenAuthentication, SessionAuthentication
+from rest_framework_simplejwt.authentication import JWTAuthentication
 
 # --- YARDIMCI FONKSİYONLAR ---
 
@@ -496,8 +498,9 @@ from django.http import StreamingHttpResponse
 import json
 
 class QuizAIAnalysisView(APIView):
+    authentication_classes = [JWTAuthentication, SessionAuthentication]
     permission_classes = [IsAuthenticated]
-    renderer_classes = [PlainTextRenderer]
+    renderer_classes = [PlainTextRenderer] # Daha önce eklediğimiz renderer
 
     def get(self, request, attempt_id):
         try:

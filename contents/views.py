@@ -21,6 +21,7 @@ from vertexai.generative_models import GenerativeModel
 from google.oauth2 import service_account
 import os
 import json
+from rest_framework.renderers import BaseRenderer
 
 # --- YARDIMCI FONKSİYONLAR ---
 

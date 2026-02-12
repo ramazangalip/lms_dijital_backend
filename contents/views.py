@@ -485,6 +485,9 @@ class QuizLastAttemptView(APIView):
                 "wrong_answers": attempt.wrong_answers 
             }, status=200)
 
+from django.http import StreamingHttpResponse
+import json
+
 class QuizAIAnalysisView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -496,42 +499,55 @@ class QuizAIAnalysisView(APIView):
             
             details = "".join([f"Soru: {ans.question.question_text}\nYanlış: {ans.selected_option.option_text}\n\n" for ans in wrong_answers])
             prompt = (
-    f"Sen uzman bir eğitim danışmanısın. Öğrencin {user_name}, '{attempt.quiz.title}' sınavında %{attempt.score} başarı sağladı. "
-    f"Hatalı sorular ve detayları şunlar:\n{details}\n\n"
-    f"TALİMATLAR:\n"
-    f"1. Direkt '{user_name}, merhaba!' diyerek başla.\n"
-    f"2. Skoru değerlendir ve moral verici bir giriş yap.\n"
-    f"3. Hataları maddeler halinde, teknik terimlerden kaçınarak, anlaşılır şekilde açıkla.\n"
-    f"4. Gelişim için 2 spesifik tavsiye ver.\n"
-    f"5. Gereksiz giriş-çıkış cümlelerinden kaçın, doğrudan konuya odaklan ki yanıt hızlı üretilsin."
-)
+                f"Sen uzman bir eğitim danışmanısın. Öğrencin {user_name}, '{attempt.quiz.title}' sınavında %{attempt.score} başarı sağladı. "
+                f"Hatalı sorular ve detayları şunlar:\n{details}\n\n"
+                f"TALİMATLAR:\n"
+                f"1. Direkt '{user_name}, merhaba!' diyerek başla.\n"
+                f"2. Skoru değerlendir ve moral verici bir giriş yap.\n"
+                f"3. Hataları maddeler halinde, teknik terimlerden kaçınarak, anlaşılır şekilde açıkla.\n"
+                f"4. Gelişim için 2 spesifik tavsiye ver.\n"
+                f"5. Gereksiz giriş-çıkış cümlelerinden kaçın, doğrudan konuya odaklan ki yanıt hızlı üretilsin."
+            )
 
-            config = init_vertex_ai()
-            url = f"https://{config['location']}-aiplatform.googleapis.com/v1/projects/{config['project_id']}/locations/{config['location']}/publishers/google/models/{config['model_id']}:generateContent"
-            
-            headers = {"Authorization": f"Bearer {config['token']}", "Content-Type": "application/json"}
-            payload = {
-                "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                "generationConfig": {"maxOutputTokens": 8192, "temperature": 0.7}
-            }
-
-            # Analiz uzun sürebileceği için timeout 500 saniye
-            response = requests.post(url, headers=headers, json=payload, timeout=500)
-            res_json = response.json()
-
-            ai_feedback_text = "".join([p.get('text', '') for p in res_json['candidates'][0]['content']['parts']]) if 'candidates' in res_json else "Analiz şu an hazır değil."
-
-            # Round 2 Mantığı
+            # Round 2 Mantığı (Streaming öncesi durum kontrolü)
             weekly_content = attempt.quiz.material.parent_content
             progress = StudentProgress.objects.get(student=request.user, weekly_content=weekly_content)
-            is_upgraded = False
             if attempt.wrong_answers > 0 and progress.current_attempt_round == 1:
                 progress.current_attempt_round = 2
                 progress.completion_percentage = 0
                 progress.save()
-                is_upgraded = True
 
-            return Response({"ai_feedback": ai_feedback_text, "round_upgraded": is_upgraded, "current_round": progress.current_attempt_round}, status=200)
+            def stream_generator():
+                config = init_vertex_ai()
+                # generateContent yerine streamGenerateContent kullanıyoruz
+                url = f"https://{config['location']}-aiplatform.googleapis.com/v1/projects/{config['project_id']}/locations/{config['location']}/publishers/google/models/{config['model_id']}:streamGenerateContent"
+                
+                headers = {"Authorization": f"Bearer {config['token']}", "Content-Type": "application/json"}
+                payload = {
+                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                    "generationConfig": {"maxOutputTokens": 8192, "temperature": 0.7} # İstediğin limit korundu
+                }
+
+                response = requests.post(url, headers=headers, json=payload, timeout=500, stream=True)
+                
+                for line in response.iter_lines():
+                    if line:
+                        decoded_line = line.decode('utf-8').strip()
+                        # Google Stream formatı bazen '[, {' ile başlar, temizliyoruz
+                        if decoded_line.startswith(','): decoded_line = decoded_line[1:].strip()
+                        if decoded_line.startswith('['): decoded_line = decoded_line[1:].strip()
+                        if decoded_line.endswith(']'): decoded_line = decoded_line[:-1].strip()
+                        
+                        try:
+                            chunk = json.loads(decoded_line)
+                            if 'candidates' in chunk:
+                                text_part = chunk['candidates'][0]['content']['parts'][0].get('text', '')
+                                yield text_part
+                        except:
+                            continue
+
+            return StreamingHttpResponse(stream_generator(), content_type='text/plain')
+
         except Exception as e:
             return Response({"error": "Sistemsel bir hata oluştu."}, status=500)
 

@@ -530,31 +530,40 @@ class QuizAIAnalysisView(APIView):
 
             def stream_generator():
                 config = init_vertex_ai()
-                # generateContent yerine streamGenerateContent kullanıyoruz
                 url = f"https://{config['location']}-aiplatform.googleapis.com/v1/projects/{config['project_id']}/locations/{config['location']}/publishers/google/models/{config['model_id']}:streamGenerateContent"
                 
                 headers = {"Authorization": f"Bearer {config['token']}", "Content-Type": "application/json"}
                 payload = {
                     "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                    "generationConfig": {"maxOutputTokens": 8192, "temperature": 0.7} # İstediğin limit korundu
+                    "generationConfig": {"maxOutputTokens": 8192, "temperature": 0.7}
                 }
 
+                # stream=True ile bağlantıyı açıyoruz
                 response = requests.post(url, headers=headers, json=payload, timeout=500, stream=True)
                 
                 for line in response.iter_lines():
                     if line:
                         decoded_line = line.decode('utf-8').strip()
-                        # Google Stream formatı bazen '[, {' ile başlar, temizliyoruz
+                        
+                        # Google Stream bazen 'data: ' ön ekiyle veya '[' ile başlar.
+                        # Gereksiz karakterleri temizleyip saf JSON'a odaklanıyoruz.
+                        if decoded_line.startswith('data:'):
+                            decoded_line = decoded_line[5:].strip()
                         if decoded_line.startswith(','): decoded_line = decoded_line[1:].strip()
                         if decoded_line.startswith('['): decoded_line = decoded_line[1:].strip()
                         if decoded_line.endswith(']'): decoded_line = decoded_line[:-1].strip()
                         
                         try:
                             chunk = json.loads(decoded_line)
+                            # Google'ın standart asenkron yanıt yapısı:
                             if 'candidates' in chunk:
-                                text_part = chunk['candidates'][0]['content']['parts'][0].get('text', '')
-                                yield text_part
-                        except:
+                                parts = chunk['candidates'][0].get('content', {}).get('parts', [])
+                                if parts:
+                                    text_part = parts[0].get('text', '')
+                                    # Frontend'e her parçayı gönder ve anında boşalt (flush)
+                                    yield text_part
+                        except (json.JSONDecodeError, KeyError, IndexError):
+                            # JSON olmayan satırları (örn: boşluk veya özel karakter) atla
                             continue
 
             return StreamingHttpResponse(stream_generator(), content_type='text/plain')

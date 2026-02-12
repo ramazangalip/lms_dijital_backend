@@ -1,1 +1,2 @@
-gunicorn lms.wsgi:application --bind 0.0.0.0:8000 --timeout 300
+# --worker-class gevent ekleyerek uzun süren akışları (streaming) destekliyoruz
+gunicorn lms.wsgi:application --bind 0.0.0.0:8000 --workers 2 --worker-class gevent --timeout 300

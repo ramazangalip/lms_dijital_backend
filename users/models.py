@@ -7,7 +7,7 @@ class User(AbstractUser):
         ('isg', 'İş Sağlığı Ve Güvenliği'),
         ('beslenmevediyetetik', 'Beslenme Ve Diyetetik'),
         ('hemsirelik', 'Hemşirelik'),
-        ('saglikkurumlarıisletmeciligi', 'Sağlık Kurumları İşletmeciliği'),
+        ('saglikyönetimi', 'Sağlık Yönetimi'),
         ('webtasarimvekodlama', 'Web Tasarım Ve Kodlama'),
 
         

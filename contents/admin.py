@@ -119,5 +119,31 @@ class QuizAdmin(admin.ModelAdmin):
 
 # Tekil kayıtlar
 admin.site.register(Material)
-admin.site.register(CompletedMaterial)
+@admin.register(CompletedMaterial)
+class CompletedMaterialAdmin(admin.ModelAdmin):
+    # list_display: Tablo sütunlarında nelerin görüneceğini belirler
+    list_display = ('get_student_full_name', 'get_department', 'get_material_name', 'completed_at')
+    
+    # Filtreleme seçenekleri
+    list_filter = ('completed_at', 'student__department', 'material__content_type')
+    
+    # Arama çubuğu (Öğrenci adı, e-postası veya materyal başlığına göre)
+    search_fields = ('student__first_name', 'student__last_name', 'student__email', 'material__title')
+
+    # 1. Öğrenci Adı ve Soyadı
+    def get_student_full_name(self, obj):
+        return f"{obj.student.first_name} {obj.student.last_name}"
+    get_student_full_name.short_description = 'Öğrenci Adı Soyadı'
+    get_student_full_name.admin_order_field = 'student__first_name'
+
+    # 2. Bölüm Bilgisi
+    def get_department(self, obj):
+        # User modelindeki department alanını çeker (get_department_display seçeneği varsa onu kullanır)
+        return obj.student.get_department_display() if hasattr(obj.student, 'get_department_display') else obj.student.department
+    get_department.short_description = 'Bölüm'
+
+    # 3. Materyal İsmi
+    def get_material_name(self, obj):
+        return obj.material.title
+    get_material_name.short_description = 'Tamamlanan İçerik'
 admin.site.register(Flashcard)

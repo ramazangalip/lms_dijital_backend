@@ -328,11 +328,65 @@ class TeacherAnalyticsView(APIView):
             return Response(serializer.data)
 
 class StudentAnalyticsView(APIView):
+    """
+    Hem Öğrenci hem de Akademisyen Paneli için veri sağlar.
+    Öğrenci gelse sadece kendi temel verisini, Hoca gelirse tüm listeyi döner.
+    """
     permission_classes = [IsAuthenticated]
+
     def get(self, request):
-        students = User.objects.filter(is_staff=False)
-        serializer = StudentAnalyticsSerializer(students, many=True)
-        return Response(serializer.data)
+        # 1. İstek atan kullanıcı Akademisyen mi?
+        is_teacher = getattr(request.user, 'is_teacher', False) or request.user.is_staff
+        student_id_param = request.query_params.get('student_id')
+
+        # --- DURUM A: ÖĞRENCİ KENDİ PANELİNE GİRİYOR ---
+        if not is_teacher:
+            # Öğrenci için tüm sınıfın dökümünü hesaplama! Sadece kendi puanını dön.
+            # Bu kısım saniyeler süren çökme riskini 1 milisaniyeye indirir.
+            return Response({
+                "id": request.user.id,
+                "first_name": request.user.first_name,
+                "last_name": request.user.last_name,
+                "total_points": getattr(request.user, 'total_points', 0),
+                "overall_progress": 0,
+                "weekly_breakdown": [] # Öğrenci paneli için detay gerekmiyor
+            }, status=200)
+
+        # --- DURUM B: HOCA, BİR ÖĞRENCİNİN KARNESİNE BAKIYOR (MODAL) ---
+        if student_id_param:
+            student = get_object_or_404(User, id=student_id_param)
+            # Sadece tek bir öğrenci olduğu için Serializer kullanımı burada güvenlidir.
+            serializer = StudentAnalyticsSerializer(student)
+            return Response(serializer.data, status=200)
+
+        # --- DURUM C: HOCA ANA TABLOYU AÇIYOR (81 ÖĞRENCİ LİSTESİ) ---
+        # N+1 problemini çözmek için toplu veri çekimi (prefetch) kullanıyoruz.
+        students = User.objects.filter(is_staff=False, is_teacher=False).prefetch_related(
+            'studentprogress_set',
+            'timetracking_set'
+        ).order_by('first_name')
+
+        analytics_data = []
+        for s in students:
+            # Hafızadaki verileri değişkenlere al (DB'ye tekrar gitmeyi önler)
+            progresses = list(s.studentprogress_set.all())
+            trackings = list(s.timetracking_set.all())
+            
+            total_seconds = sum(t.duration_seconds for t in trackings)
+            avg_progress = sum(p.completion_percentage for p in progresses) / len(progresses) if progresses else 0
+
+            analytics_data.append({
+                "id": str(s.id),
+                "first_name": s.first_name,
+                "last_name": s.last_name,
+                "department": s.department,
+                "total_points": getattr(s, 'total_points', 0),
+                "total_time_spent": total_seconds,
+                "overall_progress": round(avg_progress, 1),
+                "weekly_breakdown": [] # Ana listede döküm gönderme, sistemi yavaşlatır
+            })
+
+        return Response(analytics_data, status=200)
 
 # --- YAPAY ZEKA SOHBET ---
 

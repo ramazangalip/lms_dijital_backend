@@ -625,115 +625,84 @@ class QuizAIAnalysisView(APIView):
         except Exception as e:
             return Response({"error": "Sistemsel bir hata oluştu."}, status=500)
 
+User = get_user_model()
+
 class BulkAcademicReportView(APIView):
-    """
-    Akademisyen Paneli için toplu PDF raporu verisi sağlar.
-    Her haftanın altında o haftaya ait TÜM materyallerin detaylı sürelerini raporlar.
-    """
     permission_classes = [IsAdminUser]
 
     def get(self, request):
-        # 1. Filtre parametresini al
-        department_filter = request.query_params.get('department', 'all')
+        department_filter = request.query_params.get('department')
         
-        # 2. Sadece öğrencileri getir (Hocalar ve adminler hariç)
-        students = User.objects.filter(is_staff=False, is_teacher=False)
+        if not department_filter or department_filter == 'all':
+            return Response({"detail": "Bölüm seçiniz."}, status=400)
 
-        if department_filter and department_filter != 'all':
-            students = students.filter(department=department_filter)
-        
-        students = students.order_by('first_name')
+        # 1. ADIM: İhtiyacımız olan tüm öğrencileri ve ilişkili verileri TEK SEFERDE çek
+        students = User.objects.filter(
+            is_staff=False, is_teacher=False, department=department_filter
+        ).prefetch_related(
+            'timetracking_set', 
+            'studentquizattempt_set__quiz__material__parent_content',
+            'studentprogress_set'
+        ).order_by('first_name')
+
+        # 2. ADIM: Tüm haftalık içerikleri ve materyalleri hafızaya al
+        all_weeks = list(WeeklyContent.objects.all().prefetch_related('materials'))
+        week_map = {w.week_number: w for w in all_weeks}
         
         report_data = []
 
+        # 3. ADIM: Hafızadaki veriler üzerinden dön (Veritabanına bir daha gidilmez)
         for student in students:
-            weekly_stats = []
-            
-            # Öğrencinin sistemdeki tüm zaman kaydı (Genel Toplam)
-            overall_total_seconds = TimeTracking.objects.filter(
-                student=student
-            ).aggregate(total=Sum('duration_seconds'))['total'] or 0
-            
-            # 14 Haftalık döngü
-            for i in range(1, 15):
-                # O haftanın içerik nesnesini bul
-                week_content = WeeklyContent.objects.filter(week_number=i).first()
-                
-                # --- TUR 1 VERİLERİ ---
-                duration_1 = TimeTracking.objects.filter(
-                    student=student, 
-                    weekly_content=week_content,
-                    attempt_round=1
-                ).aggregate(total=Sum('duration_seconds'))['total'] or 0
-                
-                attempt_1 = StudentQuizAttempt.objects.filter(
-                    student=student, 
-                    quiz__material__parent_content=week_content,
-                    attempt_round=1
-                ).first()
+            # Öğrenciye ait tüm kayıtları listeye çevir (RAM'de süzmek için)
+            student_trackings = list(student.timetracking_set.all())
+            student_attempts = list(student.studentquizattempt_set.all())
+            student_progresses = list(student.studentprogress_set.all())
 
-                # --- TUR 2 VERİLERİ ---
-                duration_2 = TimeTracking.objects.filter(
-                    student=student, 
-                    weekly_content=week_content,
-                    attempt_round=2
-                ).aggregate(total=Sum('duration_seconds'))['total'] or 0
+            weekly_stats = []
+            overall_total_seconds = sum(t.duration_seconds for t in student_trackings)
+            
+            for i in range(1, 15):
+                week_content = week_map.get(i)
+                w_id = week_content.id if week_content else None
                 
-                attempt_2 = StudentQuizAttempt.objects.filter(
-                    student=student, 
-                    quiz__material__parent_content=week_content,
-                    attempt_round=2
-                ).first()
+                # --- TUR 1 & 2 VERİLERİ (Hafızadan Filtrele) ---
+                duration_1 = sum(t.duration_seconds for t in student_trackings if t.weekly_content_id == w_id and t.attempt_round == 1)
+                duration_2 = sum(t.duration_seconds for t in student_trackings if t.weekly_content_id == w_id and t.attempt_round == 2)
                 
-                # --- MATERYAL BAZLI DETAYLI SÜRELER ---
+                attempt_1 = next((a for a in student_attempts if a.quiz.material.parent_content_id == w_id and a.attempt_round == 1), None)
+                attempt_2 = next((a for a in student_attempts if a.quiz.material.parent_content_id == w_id and a.attempt_round == 2), None)
+                
+                # --- MATERYAL DETAYLARI (Hafızadan Filtrele) ---
                 material_details = []
                 if week_content:
-                    # Haftaya ait tüm materyalleri (Video, PDF, Ödev vb.) al
-                    mats = week_content.materials.all()
-                    for m in mats:
-                        # Bu öğrencinin bu spesifik materyalde harcadığı süre
-                        m_duration = TimeTracking.objects.filter(
-                            student=student,
-                            material=m
-                        ).aggregate(total=Sum('duration_seconds'))['total'] or 0
-                        
+                    for m in week_content.materials.all():
+                        m_duration = sum(t.duration_seconds for t in student_trackings if t.material_id == m.id)
                         material_details.append({
                             "title": m.title,
                             "content_type": m.content_type,
                             "duration_seconds": m_duration
                         })
 
-                # Mevcut ilerleme durumu
-                progress_record = StudentProgress.objects.filter(
-                    student=student, 
-                    weekly_content=week_content
-                ).first()
+                # --- İLERLEME (Hafızadan Filtrele) ---
+                progress_record = next((p for p in student_progresses if p.weekly_content_id == w_id), None)
                 progress_value = progress_record.completion_percentage if progress_record else 0
 
                 weekly_stats.append({
                     "week": i,
                     "progress": float(progress_value),
-                    
-                    # Materyal detay listesi
                     "material_details": material_details,
-                    
-                    # Tur 1
                     "duration_seconds": duration_1,
                     "correct": attempt_1.correct_answers if attempt_1 else 0,
                     "wrong": attempt_1.wrong_answers if attempt_1 else 0,
                     "score_1": attempt_1.score if attempt_1 else 0,
-                    
-                    # Tur 2
                     "duration_seconds_2": duration_2,
                     "correct_2": attempt_2.correct_answers if attempt_2 else 0,
                     "wrong_2": attempt_2.wrong_answers if attempt_2 else 0,
                     "score_2": attempt_2.score if attempt_2 else 0,
-                    
                     "has_quiz": True if (attempt_1 or attempt_2) else False,
                     "is_round_2_started": True if (duration_2 > 0 or attempt_2) else False
                 })
 
-            # Öğrenci paketini oluştur
             report_data.append({
                 "id": str(student.id),
                 "full_name": f"{student.first_name} {student.last_name}".upper(),
@@ -744,5 +713,5 @@ class BulkAcademicReportView(APIView):
                 "weekly_breakdown": weekly_stats
             })
 
-        return Response(report_data, status=status.HTTP_200_OK)
+        return Response(report_data, status=200)
  

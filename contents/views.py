@@ -359,8 +359,12 @@ class StudentAnalyticsView(APIView):
             serializer = StudentAnalyticsSerializer(student)
             return Response(serializer.data, status=200)
 
-        # --- DURUM C: HOCA ANA TABLOYU AÇIYOR (81 ÖĞRENCİ LİSTESİ) ---
-        # N+1 problemini çözmek için toplu veri çekimi (prefetch) kullanıyoruz.
+        total_weeks_count = WeeklyContent.objects.count()
+        
+        # Eğer henüz hiç hafta eklenmemişse hata oluşmaması için kontrol
+        if total_weeks_count == 0:
+            total_weeks_count = 1 
+
         students = User.objects.filter(is_staff=False, is_teacher=False).prefetch_related(
             'studentprogress_set',
             'timetracking_set'
@@ -368,12 +372,16 @@ class StudentAnalyticsView(APIView):
 
         analytics_data = []
         for s in students:
-            # Hafızadaki verileri değişkenlere al (DB'ye tekrar gitmeyi önler)
             progresses = list(s.studentprogress_set.all())
             trackings = list(s.timetracking_set.all())
             
             total_seconds = sum(t.duration_seconds for t in trackings)
-            avg_progress = sum(p.completion_percentage for p in progresses) / len(progresses) if progresses else 0
+            
+            # 2. HESAPLAMA: Toplam ilerlemeyi dinamik hafta sayısına böl
+            total_progress_sum = sum(p.completion_percentage for p in progresses)
+            avg_progress = total_progress_sum / total_weeks_count
+            
+            avg_progress = min(avg_progress, 100.0)
 
             analytics_data.append({
                 "id": str(s.id),
@@ -383,7 +391,7 @@ class StudentAnalyticsView(APIView):
                 "total_points": getattr(s, 'total_points', 0),
                 "total_time_spent": total_seconds,
                 "overall_progress": round(avg_progress, 1),
-                "weekly_breakdown": [] # Ana listede döküm gönderme, sistemi yavaşlatır
+                "weekly_breakdown": []
             })
 
         return Response(analytics_data, status=200)

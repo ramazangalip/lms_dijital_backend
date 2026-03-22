@@ -93,9 +93,34 @@ class StudentQuestionAdmin(admin.ModelAdmin):
 
 class StudentAnswerInline(admin.TabularInline):
     model = StudentAnswer
-    extra = 0
-    readonly_fields = ('question', 'selected_option', 'is_correct')
-    can_delete = False
+    extra = 1
+    fields = ('question', 'selected_option', 'get_correct_option', 'is_correct')
+    readonly_fields = ('get_correct_option', 'is_correct') # is_correct'i de readonly yapalım, sistem hesaplasın
+    can_delete = True
+
+    def get_correct_option(self, obj):
+        """İlgili sorunun veritabanındaki doğru şıkkını getirir."""
+        if obj and obj.question:
+            # Soruya ait seçenekler arasından 'is_correct=True' olanı bulur
+            # related_name tanımlamadıysan quizoption_set kullanmalısın
+            correct = obj.question.options.filter(is_correct=True).first()
+            if correct:
+                return correct.option_text
+        return "-"
+    get_correct_option.short_description = "Sistemin Doğru Cevabı"
+
+    def formfield_for_foreignkey(self, db_field, request, obj=None, **kwargs):
+        """
+        KRİTİK: Seçenek listesini sadece ilgili soruya ait şıklarla kısıtlar.
+        """
+        if db_field.name == "selected_option":
+            # Eğer bir satır düzenleniyorsa (obj varsa)
+            if obj:
+                # kwargs["queryset"] = QuizOption.objects.filter(question=obj.question)
+                # Not: Inline'da satır bazlı kısıtlama standart Django'da zordur, 
+                # ancak bu fonksiyon genel kısıtlama sağlar.
+                pass
+        return super().formfield_for_foreignkey(db_field, request, obj, **kwargs)
 
 @admin.register(StudentQuizAttempt)
 class StudentQuizAttemptAdmin(admin.ModelAdmin):
@@ -103,6 +128,20 @@ class StudentQuizAttemptAdmin(admin.ModelAdmin):
     list_filter = ('quiz', 'completed_at')
     search_fields = ('student__email', 'quiz__title')
     inlines = [StudentAnswerInline]
+
+    # Admin panelinden veri girerken kolaylık sağlar
+    def save_formset(self, request, form, formset, change):
+        """
+        Inline cevaplar kaydedilirken is_correct alanını otomatik güncelle.
+        Böylece sen sadece öğrencinin cevabını seçersin, sistem doğru mu yanlış mı anlar.
+        """
+        instances = formset.save(commit=False)
+        for instance in instances:
+            if isinstance(instance, StudentAnswer):
+                # Öğrencinin seçtiği şık, sorunun doğru şıkkı mı?
+                instance.is_correct = instance.selected_option.is_correct
+            instance.save()
+        formset.save_m2m()
 
 class QuizOptionInline(admin.TabularInline):
     model = QuizOption

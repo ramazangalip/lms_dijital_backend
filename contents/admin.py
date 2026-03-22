@@ -109,18 +109,18 @@ class StudentAnswerInline(admin.TabularInline):
         return "-"
     get_correct_option.short_description = "Sistemin Doğru Cevabı"
 
-    def formfield_for_foreignkey(self, db_field, request, obj=None, **kwargs):
+    def formfield_for_foreignkey(self, db_field, request, **kwargs):
         """
-        KRİTİK: Seçenek listesini sadece ilgili soruya ait şıklarla kısıtlar.
+        Seçenek listesini kısıtlar. 
+        Not: Django formfield_for_foreignkey metodu 'obj' parametresini direkt almaz.
         """
         if db_field.name == "selected_option":
-            # Eğer bir satır düzenleniyorsa (obj varsa)
-            if obj:
-                # kwargs["queryset"] = QuizOption.objects.filter(question=obj.question)
-                # Not: Inline'da satır bazlı kısıtlama standart Django'da zordur, 
-                # ancak bu fonksiyon genel kısıtlama sağlar.
-                pass
-        return super().formfield_for_foreignkey(db_field, request, obj, **kwargs)
+            # Burada kısıtlama yapmak istersen obj'ye request üzerinden erişilir 
+            # ama inline yapılarda bu oldukça karışıktır.
+            pass
+            
+        # KRİTİK DÜZELTME: super() çağrısından 'obj' parametresini kaldırdık.
+        return super().formfield_for_foreignkey(db_field, request, **kwargs)
 
 @admin.register(StudentQuizAttempt)
 class StudentQuizAttemptAdmin(admin.ModelAdmin):

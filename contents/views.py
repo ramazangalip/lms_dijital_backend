@@ -560,78 +560,53 @@ from django.http import StreamingHttpResponse
 import json
 
 class QuizAIAnalysisView(APIView):
-    authentication_classes = [JWTAuthentication, SessionAuthentication]
     permission_classes = [IsAuthenticated]
-    renderer_classes = [PlainTextRenderer] # Daha önce eklediğimiz renderer
 
     def get(self, request, attempt_id):
         try:
-            attempt = get_object_or_404(StudentQuizAttempt, id=str(attempt_id), student=request.user)
-            wrong_answers = StudentAnswer.objects.filter(attempt=attempt, is_correct=False).select_related('question')
-            user_name = request.user.first_name or request.user.username
+            # 1. Sınav denemesini bul
+            attempt = get_object_or_404(StudentQuizAttempt, id=attempt_id, student=request.user)
             
-            details = "".join([f"Soru: {ans.question.question_text}\nYanlış: {ans.selected_option.option_text}\n\n" for ans in wrong_answers])
-            prompt = (
-                f"Sen uzman bir eğitim danışmanısın. Öğrencin {user_name}, '{attempt.quiz.title}' sınavında %{attempt.score} başarı sağladı. "
-                f"Hatalı sorular ve detayları şunlar:\n{details}\n\n"
-                f"TALİMATLAR:\n"
-                f"1. Direkt '{user_name}, merhaba!' diyerek başla.\n"
-                f"2. Skoru değerlendir ve moral verici bir giriş yap.\n"
-                f"3. Hataları maddeler halinde, teknik terimlerden kaçınarak, anlaşılır şekilde açıkla.\n"
-                f"4. Gelişim için 2 spesifik tavsiye ver.\n"
-                f"5. Gereksiz giriş-çıkış cümlelerinden kaçın, doğrudan konuya odaklan ki yanıt hızlı üretilsin."
-            )
-
-            # Round 2 Mantığı (Streaming öncesi durum kontrolü)
+            # 2. Haftalık içerik ve ilerleme kaydına ulaş
             weekly_content = attempt.quiz.material.parent_content
             progress = StudentProgress.objects.get(student=request.user, weekly_content=weekly_content)
+            
+            # --- 2. TUR TETİKLEME MANTIĞI (Aynı kalıyor) ---
             if attempt.wrong_answers > 0 and progress.current_attempt_round == 1:
                 progress.current_attempt_round = 2
-                progress.completion_percentage = 0
+                progress.completion_percentage = 0  
                 progress.save()
 
-            def stream_generator():
-                config = init_vertex_ai()
-                url = f"https://{config['location']}-aiplatform.googleapis.com/v1/projects/{config['project_id']}/locations/{config['location']}/publishers/google/models/{config['model_id']}:streamGenerateContent"
+            # 3. VERİTABANINDAN HAZIR ANALİZLERİ TOPLA
+            # Öğrencinin yanlış cevapladığı soruları çekiyoruz
+            wrong_answers = StudentAnswer.objects.filter(
+                attempt=attempt, 
+                is_correct=False
+            ).select_related('question')
+
+            combined_analysis = ""
+            user_name = request.user.first_name if request.user.first_name else request.user.username
+            
+            combined_analysis += f"Merhaba {user_name}, bu testteki performansını senin için analiz ettim:\n\n"
+
+            for ans in wrong_answers:
+                # Soru bazlı hazır açıklamayı (explanation) çekiyoruz
+                q_text = ans.question.question_text
+                # Eğer explanation boşsa bir fallback metni koyuyoruz
+                q_analysis = ans.question.explanation if ans.question.explanation else "Bu konuyla ilgili ders notlarını tekrar gözden geçirmelisin."
                 
-                headers = {"Authorization": f"Bearer {config['token']}", "Content-Type": "application/json"}
-                payload = {
-                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-                    "generationConfig": {"maxOutputTokens": 8192, "temperature": 0.7}
-                }
+                combined_analysis += f"• SORU: {q_text}\n"
+                combined_analysis += f"• ANALİZ: {q_analysis}\n\n"
 
-                # stream=True ile bağlantıyı açıyoruz
-                response = requests.post(url, headers=headers, json=payload, timeout=500, stream=True)
-                
-                for line in response.iter_lines():
-                    if line:
-                        decoded_line = line.decode('utf-8').strip()
-                        
-                        # Google Stream bazen 'data: ' ön ekiyle veya '[' ile başlar.
-                        # Gereksiz karakterleri temizleyip saf JSON'a odaklanıyoruz.
-                        if decoded_line.startswith('data:'):
-                            decoded_line = decoded_line[5:].strip()
-                        if decoded_line.startswith(','): decoded_line = decoded_line[1:].strip()
-                        if decoded_line.startswith('['): decoded_line = decoded_line[1:].strip()
-                        if decoded_line.endswith(']'): decoded_line = decoded_line[:-1].strip()
-                        
-                        try:
-                            chunk = json.loads(decoded_line)
-                            # Google'ın standart asenkron yanıt yapısı:
-                            if 'candidates' in chunk:
-                                parts = chunk['candidates'][0].get('content', {}).get('parts', [])
-                                if parts:
-                                    text_part = parts[0].get('text', '')
-                                    # Frontend'e her parçayı gönder ve anında boşalt (flush)
-                                    yield text_part
-                        except (json.JSONDecodeError, KeyError, IndexError):
-                            # JSON olmayan satırları (örn: boşluk veya özel karakter) atla
-                            continue
+            combined_analysis += "\nŞimdi 2. tura geçerek bu eksiklerini tamamlayabilirsin. Başarılar!"
 
-            return StreamingHttpResponse(stream_generator(), content_type='text/plain')
-
-        except Exception as e:
-            return Response({"error": "Sistemsel bir hata oluştu."}, status=500)
+            return Response({
+                "ai_feedback": combined_analysis, # İsim aynı kalsın ki frontend kırılmasın
+                "current_round": progress.current_attempt_round
+            }, status=200)
+            
+        except Exception as e: 
+            return Response({"error": "Analiz verisi alınamadı."}, status=500)
 
 User = get_user_model()
 

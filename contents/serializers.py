@@ -19,7 +19,7 @@ class QuizQuestionSerializer(serializers.ModelSerializer):
     options = QuizOptionSerializer(many=True)
     class Meta:
         model = QuizQuestion
-        fields = ['id', 'question_text', 'order', 'options']
+        fields = ['id', 'question_text', 'order', 'options','explanation']
 
 class QuizSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True) 

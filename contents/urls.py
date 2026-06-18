@@ -28,6 +28,7 @@ urlpatterns = [
     path('quiz/<str:quiz_id>/last-attempt/', QuizLastAttemptView.as_view(), name='quiz-last-attempt'),
     path('weeks/complete-intro/', CompleteIntroVideoView.as_view(), name='complete-intro'),
     path('bulk-academic-report/', BulkAcademicReportView.as_view(), name='bulk-report'),
+    path('system-time-analytics/', SystemTimeAnalyticsView.as_view(), name='system-time-analytics'),
     
  
 ]

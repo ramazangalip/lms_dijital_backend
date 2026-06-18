@@ -698,3 +698,83 @@ class BulkAcademicReportView(APIView):
 
         return Response(report_data, status=200)
  
+from rest_framework.response import Response
+from rest_framework.views import APIView
+from rest_framework import permissions
+from django.db.models import Sum, Max, Min, Value, CharField, FloatField
+from django.db.models.functions import Concat, Cast
+from .models import TimeTracking
+
+class SystemTimeAnalyticsView(APIView):
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        dept = request.query_params.get('department')
+        
+        # Ana sorgu kalkanı
+        logs = TimeTracking.objects.all()
+        if dept:
+            logs = logs.filter(student__department=dept)
+
+        # 1. Öğrenci Bazında Toplam Süreleri Hesapla (En Çok ve En Azı Bulmak İçin)
+        student_totals = logs.values('student').annotate(
+            full_name=Concat(
+                'student__first_name', Value(' '), 'student__last_name',
+                output_field=CharField()
+            ),
+            total_hours=Sum(Cast('duration_seconds', FloatField())) / 3600.0
+        ).order_by('-total_hours')
+
+        # Varsayılan değerler
+        max_student = {"student": "Veri Yok", "time": "0 Saat"}
+        min_student = {"student": "Veri Yok", "time": "0 Saat"}
+
+        if student_totals.exists():
+            most_active = student_totals.first()
+            least_active = student_totals.last()
+            
+            max_student = {
+                "student": most_active['full_name'] if most_active['full_name'].strip() else "Bilinmeyen Öğrenci",
+                "time": f"{round(most_active['total_hours'], 2)} Saat"
+            }
+            min_student = {
+                "student": least_active['full_name'] if least_active['full_name'].strip() else "Bilinmeyen Öğrenci",
+                "time": f"{round(least_active['total_hours'], 2)} Saat"
+            }
+
+        # 2. Etkinlik Türlerine (Material Content Type) Göre Zaman Dağılımı
+        # video, podcast, form, pdf, assignment tiplerini grupluyoruz
+        activity_totals = logs.values('material__content_type').annotate(
+            total_hours=Sum(Cast('duration_seconds', FloatField())) / 3600.0
+        ).order_by('-total_hours')
+
+        type_mapping = {
+            'video': 'Video İzleme',
+            'podcast': 'Podcast Dinleme',
+            'form': 'Bilgi Testi (Quiz)',
+            'pdf': 'Ders Notu Okuma (PDF)',
+            'assignment': 'Ödev Çözme'
+        }
+
+        activity_distribution = []
+        for act in activity_totals:
+            raw_type = act['material__content_type']
+            if raw_type: # Null kontrolü
+                activity_distribution.append({
+                    "type": type_mapping.get(raw_type, raw_type.upper()),
+                    "hours": round(act['total_hours'], 2)
+                })
+
+        # Tüm istatistikleri tek bir pakette birleştirip dönüyoruz
+        return Response({
+            "max_engagement": max_student,
+            "min_engagement": min_student,
+            "activity_distribution": activity_distribution,
+            "raw_student_list": [
+                {
+                    "rank": idx + 1,
+                    "student": s['full_name'] if s['full_name'].strip() else "Bilinmeyen Öğrenci",
+                    "time": f"{round(s['total_hours'], 2)} Saat"
+                } for idx, s in enumerate(student_totals[:15]) # İlk 10-15 öğrenciyi listele
+            ]
+        })

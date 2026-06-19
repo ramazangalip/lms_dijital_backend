@@ -701,7 +701,7 @@ class BulkAcademicReportView(APIView):
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework import permissions
-from django.db.models import Sum, Max, Min, Value, CharField, FloatField
+from django.db.models import Sum, Value, CharField, FloatField
 from django.db.models.functions import Concat, Cast
 from .models import TimeTracking
 
@@ -716,7 +716,7 @@ class SystemTimeAnalyticsView(APIView):
         if dept:
             logs = logs.filter(student__department=dept)
 
-        # 1. Öğrenci Bazında Toplam Süreleri Hesapla (En Çok ve En Azı Bulmak İçin)
+        # 1. Genel Öğrenci Bazında Toplam Süreleri Hesapla
         student_totals = logs.values('student').annotate(
             full_name=Concat(
                 'student__first_name', Value(' '), 'student__last_name',
@@ -725,7 +725,7 @@ class SystemTimeAnalyticsView(APIView):
             total_hours=Sum(Cast('duration_seconds', FloatField())) / 3600.0
         ).order_by('-total_hours')
 
-        # Varsayılan değerler
+        # Varsayılan genel değerler
         max_student = {"student": "Veri Yok", "time": "0 Saat"}
         min_student = {"student": "Veri Yok", "time": "0 Saat"}
 
@@ -742,8 +742,7 @@ class SystemTimeAnalyticsView(APIView):
                 "time": f"{round(least_active['total_hours'], 2)} Saat"
             }
 
-        # 2. Etkinlik Türlerine (Material Content Type) Göre Zaman Dağılımı
-        # video, podcast, form, pdf, assignment tiplerini grupluyoruz
+        # 2. Genel Etkinlik Türlerine Göre Zaman Dağılımı
         activity_totals = logs.values('material__content_type').annotate(
             total_hours=Sum(Cast('duration_seconds', FloatField())) / 3600.0
         ).order_by('-total_hours')
@@ -759,22 +758,91 @@ class SystemTimeAnalyticsView(APIView):
         activity_distribution = []
         for act in activity_totals:
             raw_type = act['material__content_type']
-            if raw_type: # Null kontrolü
+            if raw_type:
                 activity_distribution.append({
                     "type": type_mapping.get(raw_type, raw_type.upper()),
                     "hours": round(act['total_hours'], 2)
                 })
 
-        # Tüm istatistikleri tek bir pakette birleştirip dönüyoruz
+        # ----------------------------------------------------------------
+        # 3. HAFTA HAFTA AKADEMİK KIRILIM VE ÖĞRENCİ SIRALAMA ANALİZLERİ
+        # ----------------------------------------------------------------
+        weekly_totals = logs.values('weekly_content__week_number').annotate(
+            total_hours=Sum(Cast('duration_seconds', FloatField())) / 3600.0
+        ).order_by('weekly_content__week_number')
+
+        weekly_analysis = []
+        for week_data in weekly_totals:
+            w_num = week_data['weekly_content__week_number']
+            if w_num is None:
+                continue
+
+            # O haftaya ait özel filtreleme kalkanı
+            week_logs = logs.filter(weekly_content__week_number=w_num)
+
+            # Hafta bazında tüm öğrencilerin sürelerini hesapla ve sırala
+            week_student_totals = week_logs.values('student').annotate(
+                full_name=Concat('student__first_name', Value(' '), 'student__last_name', output_field=CharField()),
+                hours=Sum(Cast('duration_seconds', FloatField())) / 3600.0
+            ).order_by('-hours')
+
+            w_max = {"student": "Veri Yok", "time": "0 Saat"}
+            w_min = {"student": "Veri Yok", "time": "0 Saat"}
+
+            if week_student_totals.exists():
+                w_most = week_student_totals.first()
+                w_least = week_student_totals.last()
+                w_max = {
+                    "student": w_most['full_name'] if w_most['full_name'].strip() else "Bilinmeyen Öğrenci",
+                    "time": f"{round(w_most['hours'], 2)} Saat"
+                }
+                w_min = {
+                    "student": w_least['full_name'] if w_least['full_name'].strip() else "Bilinmeyen Öğrenci",
+                    "time": f"{round(w_least['hours'], 2)} Saat"
+                }
+
+            # Hafta bazında etkinlik dağılımını hesapla
+            week_activity_totals = week_logs.values('material__content_type').annotate(
+                hours=Sum(Cast('duration_seconds', FloatField())) / 3600.0
+            ).order_by('-hours')
+
+            w_activity_dist = []
+            for w_act in week_activity_totals:
+                w_raw_type = w_act['material__content_type']
+                if w_raw_type:
+                    w_activity_dist.append({
+                        "type": type_mapping.get(w_raw_type, w_raw_type.upper()),
+                        "hours": round(w_act['hours'], 2)
+                    })
+
+            # EKSTRA İSTEK: O haftanın ilk 15 öğrenci sıralama listesini oluşturuyoruz
+            w_student_list = [
+                {
+                    "rank": idx + 1,
+                    "student": s['full_name'] if s['full_name'].strip() else "Bilinmeyen Öğrenci",
+                    "time": f"{round(s['hours'], 2)} Saat"
+                } for idx, s in enumerate(week_student_totals[:15])
+            ]
+
+            weekly_analysis.append({
+                "week_number": w_num,
+                "total_hours": f"{round(week_data['total_hours'], 2)} Saat",
+                "max_engagement": w_max,
+                "min_engagement": w_min,
+                "activity_distribution": w_activity_dist,
+                "student_list": w_student_list # Haftalık sıralama listesi backend'e eklendi
+            })
+
         return Response({
             "max_engagement": max_student,
             "min_engagement": min_student,
             "activity_distribution": activity_distribution,
+            "weekly_analysis": weekly_analysis,
             "raw_student_list": [
                 {
                     "rank": idx + 1,
                     "student": s['full_name'] if s['full_name'].strip() else "Bilinmeyen Öğrenci",
                     "time": f"{round(s['total_hours'], 2)} Saat"
-                } for idx, s in enumerate(student_totals[:15]) # İlk 10-15 öğrenciyi listele
+                } for idx, s in enumerate(student_totals[:15])
             ]
         })

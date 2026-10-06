@@ -24,6 +24,10 @@ class WeeklyContent(models.Model):
         verbose_name = "Haftalık İçerik"
         verbose_name_plural = "Haftalık İçerikler"
         ordering = ['week_number']
+        indexes = [
+            models.Index(fields=['week_number']),
+            models.Index(fields=['release_date']),
+        ]
 
     def __str__(self):
         return f"Hafta {self.week_number} - {self.title}"
@@ -46,6 +50,9 @@ class IntroVideoCompletion(models.Model):
     class Meta:
         verbose_name = "Genel Tanıtım Tamamlama"
         verbose_name_plural = "Genel Tanıtım Tamamlamaları"
+        indexes = [
+            models.Index(fields=['student', 'is_watched']),
+        ]
 
     def __str__(self):
         status = "Tamamladı" if self.is_watched else "Tamamlamadı"
@@ -71,6 +78,13 @@ class Material(models.Model):
    
     point_value = models.PositiveIntegerField(default=1, verbose_name="Tamamlama Puanı")
 
+    class Meta:
+        verbose_name = "Materyal"
+        verbose_name_plural = "Materyaller"
+        indexes = [
+            models.Index(fields=['parent_content', 'content_type']),
+        ]
+
     def __str__(self):
         return f"{self.get_content_type_display()} - {self.title}"
     
@@ -90,6 +104,12 @@ class StudentProgress(models.Model):
         unique_together = ('student', 'weekly_content')
         verbose_name = "Öğrenci İlerlemesi"
         verbose_name_plural = "Öğrenci İlerlemeleri"
+        indexes = [
+            models.Index(fields=['student', 'weekly_content']),
+            models.Index(fields=['student', 'is_completed']),
+            models.Index(fields=['student', 'current_attempt_round']),
+            models.Index(fields=['weekly_content', 'is_completed']),
+        ]
 
 class TimeTracking(models.Model):
     student = models.ForeignKey(User, on_delete=models.CASCADE)
@@ -100,6 +120,17 @@ class TimeTracking(models.Model):
     
     # YENİ ALAN: Bu süre hangi turda harcandı?
     attempt_round = models.PositiveIntegerField(default=1)
+
+    class Meta:
+        verbose_name = "Zaman Takibi"
+        verbose_name_plural = "Zaman Takip Kayıtları"
+        indexes = [
+            models.Index(fields=['student', 'weekly_content', 'attempt_round']),
+            models.Index(fields=['student', 'material', 'attempt_round']),
+            models.Index(fields=['student', 'date']),
+            models.Index(fields=['weekly_content', 'attempt_round']),
+            models.Index(fields=['material', 'attempt_round']),
+        ]
 
     def __str__(self):
         return f"{self.student.email} - Tur {self.attempt_round} - {self.duration_seconds}s"
@@ -115,12 +146,30 @@ class CompletedMaterial(models.Model):
     class Meta:
         # Artık bir öğrenci bir materyali farklı turlarda tamamlayabilir
         unique_together = ('student', 'material', 'attempt_round')
+        verbose_name = "Tamamlanan Materyal"
+        verbose_name_plural = "Tamamlanan Materyaller"
+        indexes = [
+            models.Index(fields=['student', 'attempt_round']),
+            models.Index(fields=['material', 'attempt_round']),
+            models.Index(fields=['student', 'material', 'attempt_round']),
+        ]
 
 class StudentQuestion(models.Model):
     student = models.ForeignKey(User, on_delete=models.CASCADE)
     weekly_content = models.ForeignKey(WeeklyContent, on_delete=models.CASCADE)
     question_text = models.TextField()
+    response_text = models.TextField(blank=True, null=True, verbose_name="Yapay Zeka Yanıtı")
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Öğrenci Sorusu"
+        verbose_name_plural = "Öğrenci Soruları"
+        indexes = [
+            models.Index(fields=['student', 'weekly_content']),
+            models.Index(fields=['weekly_content', '-created_at']),
+            models.Index(fields=['student', '-created_at']),
+            models.Index(fields=['created_at']),
+        ]
 
     def __str__(self):
         return f"{self.student.first_name} - Hafta {self.weekly_content.week_number}"
@@ -131,6 +180,10 @@ class Quiz(models.Model):
     title = models.CharField(max_length=255)
     description = models.TextField(blank=True, null=True)
     created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Sınav"
+        verbose_name_plural = "Sınavlar"
 
     def __str__(self):
         return f"Test: {self.title} (Hafta {self.material.parent_content.week_number})"
@@ -148,6 +201,11 @@ class QuizQuestion(models.Model):
     )
     class Meta:
         ordering = ['order']
+        verbose_name = "Sınav Sorusu"
+        verbose_name_plural = "Sınav Soruları"
+        indexes = [
+            models.Index(fields=['quiz', 'order']),
+        ]
 
     def __str__(self):
         return self.question_text[:50]
@@ -158,6 +216,13 @@ class QuizOption(models.Model):
     option_text = models.CharField(max_length=255)
     is_correct = models.BooleanField(default=False)
 
+    class Meta:
+        verbose_name = "Sınav Şıkkı"
+        verbose_name_plural = "Sınav Şıkları"
+        indexes = [
+            models.Index(fields=['question', 'is_correct']),
+        ]
+
     def __str__(self):
         return self.option_text
 
@@ -165,12 +230,23 @@ class StudentQuizAttempt(models.Model):
     student = models.ForeignKey(User, on_delete=models.CASCADE)
     quiz = models.ForeignKey(Quiz, on_delete=models.CASCADE)
     score = models.IntegerField() 
+    predicted_score = models.IntegerField(default=0, verbose_name="Tahmin Edilen Skor")
+    score_difference = models.IntegerField(default=0, verbose_name="Skor Farkı (Gerçek - Tahmin)")
     correct_answers = models.IntegerField()
     wrong_answers = models.IntegerField()
     completed_at = models.DateTimeField(auto_now_add=True)
     
     # YENİ ALAN: AI analizi öncesi (1) veya sonrası (2) deneme
     attempt_round = models.PositiveIntegerField(default=1)
+
+    class Meta:
+        verbose_name = "Sınav Denemesi"
+        verbose_name_plural = "Sınav Denemeleri"
+        indexes = [
+            models.Index(fields=['student', 'quiz', 'attempt_round']),
+            models.Index(fields=['student', '-completed_at']),
+            models.Index(fields=['quiz', 'attempt_round']),
+        ]
 
     def __str__(self):
         return f"{self.student.first_name} - Tur {self.attempt_round} - %{self.score}"
@@ -181,6 +257,14 @@ class StudentAnswer(models.Model):
     question = models.ForeignKey(QuizQuestion, on_delete=models.CASCADE)
     selected_option = models.ForeignKey(QuizOption, on_delete=models.CASCADE)
     is_correct = models.BooleanField()
+
+    class Meta:
+        verbose_name = "Öğrenci Cevabı"
+        verbose_name_plural = "Öğrenci Cevapları"
+        indexes = [
+            models.Index(fields=['attempt', 'is_correct']),
+            models.Index(fields=['question', 'is_correct']),
+        ]
 
 # ... Diğer modellerin (WeeklyContent, Material vb.) aynı kalıyor ...
 
@@ -205,6 +289,9 @@ class Flashcard(models.Model):
         ordering = ['order']
         verbose_name = "Haftalık Kaynak"
         verbose_name_plural = "Haftalık Kaynaklar"
+        indexes = [
+            models.Index(fields=['weekly_content', 'order']),
+        ]
 
     def __str__(self):
         return f"{self.weekly_content.week_number}. Hafta - {self.question}"

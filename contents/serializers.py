@@ -66,74 +66,98 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
             'is_intro_watched', 'materials', 'flashcards', 'progress', 'is_completed'
         ]
 
-    def get_is_locked(self, obj):
-        """Zaman ve Sıralı İlerleme kontrolü yaparak haftanın kilitli olup olmadığını belirler."""
+    def _get_context_data(self):
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
+            return None, False, {}, False, {}
+
+        is_teacher = getattr(request.user, 'is_teacher', False) or request.user.is_staff
+        
+        if not hasattr(self, '_cached_user_id') or self._cached_user_id != request.user.id:
+            if is_teacher:
+                intro_watched = True
+                progress_by_content = {}
+                progress_by_week = {}
+            else:
+                intro_watched = IntroVideoCompletion.objects.filter(student=request.user, is_watched=True).exists()
+                progresses = list(StudentProgress.objects.filter(student=request.user).select_related('weekly_content'))
+                progress_by_content = {p.weekly_content_id: p for p in progresses}
+                progress_by_week = {p.weekly_content.week_number: p for p in progresses if p.weekly_content}
+                
+            self._cached_user_id = request.user.id
+            self._cached_is_teacher = is_teacher
+            self._cached_intro_watched = intro_watched
+            self._cached_progress_by_content = progress_by_content
+            self._cached_progress_by_week = progress_by_week
+            
+        return request.user, self._cached_is_teacher, self._cached_progress_by_content, self._cached_intro_watched, self._cached_progress_by_week
+
+    def get_is_locked(self, obj):
+        """Zaman ve Sıralı İlerleme kontrolü yaparak haftanın kilitli olup olmadığını belirler."""
+        user, is_teacher, progress_by_content, intro_watched, progress_by_week = self._get_context_data()
+        if not user:
             return True
-        if getattr(request.user, 'is_teacher', False) or request.user.is_staff:
+        if is_teacher:
             return False
 
         now = timezone.now()
-        if obj.release_date:
-            if now < obj.release_date:
-                return True
+        if obj.release_date and now < obj.release_date:
+            return True
+
         if obj.week_number > 1:
-            previous_week = WeeklyContent.objects.filter(week_number=obj.week_number - 1).first()
-            if previous_week:
-                prev_progress = StudentProgress.objects.filter(
-                    student=request.user, 
-                    weekly_content=previous_week
-                ).first()
-                
-                if not prev_progress or not prev_progress.is_completed:
-                    return True
+            prev_progress = progress_by_week.get(obj.week_number - 1)
+            if not prev_progress:
+                prev_week = WeeklyContent.objects.filter(week_number=obj.week_number - 1).first()
+                if prev_week:
+                    prev_progress = progress_by_content.get(prev_week.id)
+
+            if not prev_progress or not prev_progress.is_completed:
+                return True
         
         return False
 
     def get_lock_reason(self, obj):
         """Öğrenciye kilit sebebini GG.AA.YYYY formatında döner."""
-        request = self.context.get('request')
-        if not request or not request.user.is_authenticated or getattr(request.user, 'is_teacher', False):
+        user, is_teacher, progress_by_content, intro_watched, progress_by_week = self._get_context_data()
+        if not user or is_teacher:
             return None
 
         now = timezone.now()
-
         if obj.release_date and now < obj.release_date:
             formatted_date = obj.release_date.strftime('%d.%m.%Y')
             return f"Bu içerik {formatted_date} tarihinde erişime açılacaktır."
 
         if obj.week_number > 1:
-            previous_week = WeeklyContent.objects.filter(week_number=obj.week_number - 1).first()
-            if previous_week:
-                prev_progress = StudentProgress.objects.filter(student=request.user, weekly_content=previous_week).first()
-                if not prev_progress or not prev_progress.is_completed:
-                    return f"Bu haftayı açmak için lütfen {obj.week_number - 1}. haftayı %100 tamamlayın."
+            prev_progress = progress_by_week.get(obj.week_number - 1)
+            if not prev_progress:
+                prev_week = WeeklyContent.objects.filter(week_number=obj.week_number - 1).first()
+                if prev_week:
+                    prev_progress = progress_by_content.get(prev_week.id)
+
+            if not prev_progress or not prev_progress.is_completed:
+                return f"Bu haftayı açmak için lütfen {obj.week_number - 1}. haftayı %100 tamamlayın."
             
         return None
 
     def get_is_intro_watched(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            if getattr(request.user, 'is_teacher', False):
-                return True
-            completion = IntroVideoCompletion.objects.filter(student=request.user).first()
-            return completion.is_watched if completion else False
-        return False
+        user, is_teacher, progress_by_content, intro_watched, progress_by_week = self._get_context_data()
+        if not user:
+            return False
+        return intro_watched
 
     def get_progress(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            progress_obj = StudentProgress.objects.filter(student=request.user, weekly_content=obj).first()
-            return float(progress_obj.completion_percentage) if progress_obj else 0.0
-        return 0.0
+        user, is_teacher, progress_by_content, intro_watched, progress_by_week = self._get_context_data()
+        if not user:
+            return 0.0
+        prog = progress_by_content.get(obj.id)
+        return float(prog.completion_percentage) if prog else 0.0
 
     def get_is_completed(self, obj):
-        request = self.context.get('request')
-        if request and request.user.is_authenticated:
-            progress_obj = StudentProgress.objects.filter(student=request.user, weekly_content=obj).first()
-            return progress_obj.is_completed if progress_obj else False
-        return False
+        user, is_teacher, progress_by_content, intro_watched, progress_by_week = self._get_context_data()
+        if not user:
+            return False
+        prog = progress_by_content.get(obj.id)
+        return prog.is_completed if prog else False
 
     def create(self, validated_data):
         mats_data = validated_data.pop('materials', [])
@@ -246,118 +270,158 @@ class StudentAnalyticsSerializer(serializers.ModelSerializer):
             'total_time_spent', 'overall_progress', 'weekly_breakdown'
         ]
 
-    def get_total_time_spent(self, obj):
-        total_seconds = TimeTracking.objects.filter(student=obj).aggregate(total=Sum('duration_seconds'))['total'] or 0
-        return f"{total_seconds // 3600} saat {(total_seconds % 3600) // 60} dakika"
+    def _get_precomputed_data(self, obj):
+        if not hasattr(self, '_cached_analytics_student_id') or self._cached_analytics_student_id != obj.id:
+            from collections import defaultdict
 
-    def get_overall_progress(self, obj):
-        # 1. Toplam materyal sayısını al
-        total_materials = Material.objects.count()
-        if total_materials == 0: 
-            return 0
-            
-        # 2. ÖNEMLİ: Her hafta için sadece AKTİF TURDAKİ tamamlanmaları say
-        progresses = StudentProgress.objects.filter(student=obj)
-        
-        current_completed_count = 0
-        for prog in progresses:
-            # Sadece o haftanın o anki aktif turunda (Round 1 veya 2) bitenleri say
-            count = CompletedMaterial.objects.filter(
-                student=obj,
-                material__parent_content=prog.weekly_content,
-                attempt_round=prog.current_attempt_round
-            ).count()
-            current_completed_count += count
+            weeks = list(WeeklyContent.objects.all().order_by('week_number'))
+            all_materials = list(Material.objects.all().select_related('parent_content'))
+            total_materials_count = len(all_materials)
 
-        # 3. Yüzdeyi hesapla (Asla %100'ü geçemez)
-        percentage = (current_completed_count / total_materials) * 100
-        return round(min(percentage, 100), 2)
+            materials_by_week = defaultdict(list)
+            for m in all_materials:
+                materials_by_week[m.parent_content_id].append(m)
 
-    def get_weekly_breakdown(self, obj):
-        weeks = WeeklyContent.objects.all().order_by('week_number')
-        breakdown = []
-        
-        for week in weeks:
-            # TUR 1 TOPLAM SÜRE
-            total_sec_1 = TimeTracking.objects.filter(
-                student=obj, weekly_content=week, attempt_round=1
-            ).aggregate(total=Sum('duration_seconds'))['total'] or 0
-            
-            # TUR 2 TOPLAM SÜRE
-            total_sec_2 = TimeTracking.objects.filter(
-                student=obj, weekly_content=week, attempt_round=2
-            ).aggregate(total=Sum('duration_seconds'))['total'] or 0
-            
-            # QUIZ SONUÇLARI
-            quiz_1 = StudentQuizAttempt.objects.filter(student=obj, quiz__material__parent_content=week, attempt_round=1).first()
-            quiz_2 = StudentQuizAttempt.objects.filter(student=obj, quiz__material__parent_content=week, attempt_round=2).first()
-            
-            progress_obj = StudentProgress.objects.filter(student=obj, weekly_content=week).first()
+            # Student progress
+            progress_list = list(StudentProgress.objects.filter(student=obj))
+            progress_by_week = {p.weekly_content_id: p for p in progress_list}
 
-            # --- MATERYAL BAZLI DETAYLI SÜRE ANALİZİ ---
-            material_details = []
-            mats = week.materials.all()
-            for m in mats:
-                m_sec = TimeTracking.objects.filter(
-                    student=obj, 
-                    material=m
-                ).aggregate(total=Sum('duration_seconds'))['total'] or 0
+            # Completed materials
+            completed_materials = list(CompletedMaterial.objects.filter(student=obj).values('material_id', 'attempt_round'))
+            completed_set = {(cm['material_id'], cm['attempt_round']) for cm in completed_materials}
+
+            # Overall progress calculation
+            current_completed_count = 0
+            for prog in progress_list:
+                for m in materials_by_week.get(prog.weekly_content_id, []):
+                    if (m.id, prog.current_attempt_round) in completed_set:
+                        current_completed_count += 1
+            
+            overall_progress = 0.0
+            if total_materials_count > 0:
+                overall_progress = round(min((current_completed_count / total_materials_count) * 100, 100), 2)
+
+            # Time trackings
+            trackings = list(TimeTracking.objects.filter(student=obj).values('weekly_content_id', 'material_id', 'attempt_round', 'duration_seconds'))
+            total_seconds = sum(t['duration_seconds'] for t in trackings)
+            
+            time_by_week_round = defaultdict(int) # (week_id, attempt_round) -> sec
+            time_by_material = defaultdict(int) # material_id -> sec
+            for t in trackings:
+                w_id = t['weekly_content_id']
+                m_id = t['material_id']
+                ar = t['attempt_round']
+                dur = t['duration_seconds']
+                time_by_week_round[(w_id, ar)] += dur
+                if m_id:
+                    time_by_material[m_id] += dur
+
+            # Quiz Attempts
+            attempts = list(
+                StudentQuizAttempt.objects.filter(student=obj)
+                .select_related('quiz__material')
+                .order_by('completed_at')
+            )
+            quiz_by_week_round = {} # (week_id, round) -> attempt
+            latest_attempt_by_week = {} # week_id -> attempt
+            for att in attempts:
+                if att.quiz and att.quiz.material and att.quiz.material.parent_content_id:
+                    w_id = att.quiz.material.parent_content_id
+                    quiz_by_week_round[(w_id, att.attempt_round)] = att
+                    latest_attempt_by_week[w_id] = att
+
+            # AI Questions
+            questions_qs = list(StudentQuestion.objects.filter(student=obj).values('weekly_content_id', 'question_text'))
+            questions_by_week = defaultdict(list)
+            for q in questions_qs:
+                questions_by_week[q['weekly_content_id']].append(q['question_text'])
+
+            # Quiz Results for latest attempts
+            quiz_results_by_week = defaultdict(list)
+            last_attempt_ids = [att.id for att in latest_attempt_by_week.values()]
+            if last_attempt_ids:
+                answers = list(
+                    StudentAnswer.objects.filter(attempt_id__in=last_attempt_ids)
+                    .select_related('question', 'selected_option', 'attempt__quiz__material')
+                    .order_by('id')
+                )
                 
-                material_details.append({
-                    "title": m.title,
-                    "content_type": m.content_type,
-                    "duration_seconds": m_sec
-                })
+                # Fetch correct options for all questions involved
+                question_ids = list({ans.question_id for ans in answers})
+                correct_options_map = {
+                    opt.question_id: opt.option_text 
+                    for opt in QuizOption.objects.filter(question_id__in=question_ids, is_correct=True)
+                }
 
-            # --- YENİ: YAPAY ZEKA SORULARINI ÇEK ---
-            ai_questions = StudentQuestion.objects.filter(
-                student=obj, 
-                weekly_content=week
-            ).values_list('question_text', flat=True)
-
-            # --- YENİ: TEST CEVAP ANALİZİNİ ÇEK ---
-            # En güncel denemeyi (Tur 1 veya Varsa Tur 2) temel alarak detayları çekiyoruz
-            quiz_results = []
-            last_attempt = StudentQuizAttempt.objects.filter(
-                student=obj, 
-                quiz__material__parent_content=week
-            ).order_by('-completed_at').first()
-
-            if last_attempt:
-                answers = StudentAnswer.objects.filter(attempt=last_attempt)
                 for ans in answers:
-                    # Bu sorunun doğru şıkkını bul
-                    correct_opt = QuizOption.objects.filter(question=ans.question, is_correct=True).first()
-                    quiz_results.append({
-                        "question_text": ans.question.question_text,
-                        "selected_option": ans.selected_option.option_text,
-                        "correct_option": correct_opt.option_text if correct_opt else "Belirtilmemiş",
+                    w_id = ans.attempt.quiz.material.parent_content_id
+                    quiz_results_by_week[w_id].append({
+                        "question_text": ans.question.question_text if ans.question else "",
+                        "selected_option": ans.selected_option.option_text if ans.selected_option else "",
+                        "correct_option": correct_options_map.get(ans.question_id, "Belirtilmemiş"),
                         "is_correct": ans.is_correct
                     })
 
-            breakdown.append({
-                "week_number": week.week_number,
-                "progress": progress_obj.completion_percentage if progress_obj else 0,
-                "duration": total_sec_1 + total_sec_2, 
-                "duration_seconds": total_sec_1 + total_sec_2,
-                "material_details": material_details,
-                "questions": list(ai_questions),  # AI soruları listesi
-                "quiz_results": quiz_results,      # Test cevap detayları
+            # Build breakdown
+            breakdown = []
+            for week in weeks:
+                total_sec_1 = time_by_week_round.get((week.id, 1), 0)
+                total_sec_2 = time_by_week_round.get((week.id, 2), 0)
                 
-                # Tur 1 Detayları
-                "duration_1": total_sec_1,
-                "score_1": quiz_1.score if quiz_1 else 0,
-                "correct_1": quiz_1.correct_answers if quiz_1 else 0,
-                "wrong_1": quiz_1.wrong_answers if quiz_1 else 0,
+                quiz_1 = quiz_by_week_round.get((week.id, 1))
+                quiz_2 = quiz_by_week_round.get((week.id, 2))
+                prog_obj = progress_by_week.get(week.id)
 
-                # Tur 2 Detayları
-                "duration_2": total_sec_2,
-                "score_2": quiz_2.score if quiz_2 else 0,
-                "correct_2": quiz_2.correct_answers if quiz_2 else 0,
-                "wrong_2": quiz_2.wrong_answers if quiz_2 else 0,
-            })
-            
-        return breakdown
+                material_details = []
+                for m in materials_by_week.get(week.id, []):
+                    material_details.append({
+                        "title": m.title,
+                        "content_type": m.content_type,
+                        "duration_seconds": time_by_material.get(m.id, 0)
+                    })
+
+                breakdown.append({
+                    "week_number": week.week_number,
+                    "progress": prog_obj.completion_percentage if prog_obj else 0,
+                    "duration": total_sec_1 + total_sec_2,
+                    "duration_seconds": total_sec_1 + total_sec_2,
+                    "material_details": material_details,
+                    "questions": questions_by_week.get(week.id, []),
+                    "quiz_results": quiz_results_by_week.get(week.id, []),
+                    
+                    # Tur 1 Detayları
+                    "duration_1": total_sec_1,
+                    "score_1": quiz_1.score if quiz_1 else 0,
+                    "predicted_1": quiz_1.predicted_score if quiz_1 else 0,
+                    "diff_1": quiz_1.score_difference if quiz_1 else 0,
+                    "correct_1": quiz_1.correct_answers if quiz_1 else 0,
+                    "wrong_1": quiz_1.wrong_answers if quiz_1 else 0,
+
+                    # Tur 2 Detayları
+                    "duration_2": total_sec_2,
+                    "score_2": quiz_2.score if quiz_2 else 0,
+                    "predicted_2": quiz_2.predicted_score if quiz_2 else 0,
+                    "diff_2": quiz_2.score_difference if quiz_2 else 0,
+                    "correct_2": quiz_2.correct_answers if quiz_2 else 0,
+                    "wrong_2": quiz_2.wrong_answers if quiz_2 else 0,
+                })
+
+            self._cached_analytics_student_id = obj.id
+            self._cached_total_time_spent = f"{total_seconds // 3600} saat {(total_seconds % 3600) // 60} dakika"
+            self._cached_overall_progress = overall_progress
+            self._cached_weekly_breakdown = breakdown
+
+    def get_total_time_spent(self, obj):
+        self._get_precomputed_data(obj)
+        return self._cached_total_time_spent
+
+    def get_overall_progress(self, obj):
+        self._get_precomputed_data(obj)
+        return self._cached_overall_progress
+
+    def get_weekly_breakdown(self, obj):
+        self._get_precomputed_data(obj)
+        return self._cached_weekly_breakdown
 
 class CompleteMaterialSerializer(serializers.Serializer):
     material_id = serializers.CharField()
@@ -391,11 +455,17 @@ class BulkWeeklyStatSerializer(serializers.Serializer):
     duration_seconds = serializers.IntegerField()
     correct = serializers.IntegerField()
     wrong = serializers.IntegerField()
+    score_1 = serializers.IntegerField(required=False)
+    predicted_1 = serializers.IntegerField(required=False)
+    diff_1 = serializers.IntegerField(required=False)
     
     # Tur 2
     duration_seconds_2 = serializers.IntegerField()
     correct_2 = serializers.IntegerField()
     wrong_2 = serializers.IntegerField()
+    score_2 = serializers.IntegerField(required=False)
+    predicted_2 = serializers.IntegerField(required=False)
+    diff_2 = serializers.IntegerField(required=False)
     
     has_quiz = serializers.BooleanField()
     is_round_2_started = serializers.BooleanField()
@@ -405,8 +475,10 @@ class BulkAcademicReportSerializer(serializers.Serializer):
     id = serializers.CharField() 
     full_name = serializers.CharField()
     email = serializers.EmailField()
-    # YENİ EKLENEN ALANLAR:
     department = serializers.CharField() 
     total_points = serializers.IntegerField()
     total_time = serializers.IntegerField()
+    avg_predicted = serializers.FloatField(required=False)
+    avg_actual = serializers.FloatField(required=False)
+    avg_diff = serializers.FloatField(required=False)
     weekly_breakdown = BulkWeeklyStatSerializer(many=True)

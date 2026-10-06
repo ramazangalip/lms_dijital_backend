@@ -38,6 +38,11 @@ class User(AbstractUser):
     class Meta:
         verbose_name = "Kullanıcı"
         verbose_name_plural = "Kullanıcılar"
+        indexes = [
+            models.Index(fields=['is_staff', 'is_teacher', 'department']),
+            models.Index(fields=['is_student', 'department']),
+            models.Index(fields=['department', 'total_points']),
+        ]
 
 
 class EmailOTP(models.Model):
@@ -54,3 +59,7 @@ class EmailOTP(models.Model):
     class Meta:
         verbose_name = "E-posta Doğrulama Kodu"
         verbose_name_plural = "E-posta Doğrulama Kodları"
+        indexes = [
+            models.Index(fields=['email', 'code']),
+            models.Index(fields=['created_at']),
+        ]

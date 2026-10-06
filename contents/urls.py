@@ -29,6 +29,6 @@ urlpatterns = [
     path('weeks/complete-intro/', CompleteIntroVideoView.as_view(), name='complete-intro'),
     path('bulk-academic-report/', BulkAcademicReportView.as_view(), name='bulk-report'),
     path('system-time-analytics/', SystemTimeAnalyticsView.as_view(), name='system-time-analytics'),
-    
- 
+    path('chatbot-analytics/', ChatbotAnalyticsView.as_view(), name='chatbot_analytics'),
+    path('departments/', DepartmentListView.as_view(), name='department-list'),
 ]

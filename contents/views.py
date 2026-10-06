@@ -8,7 +8,7 @@ from .serializers import *
 from django.utils import timezone
 from datetime import date, timedelta
 from rest_framework.permissions import IsAdminUser
-from django.db.models import Sum
+from django.db.models import Sum, Count, Avg, F, Q, FloatField
 from django.conf import settings
 from django.shortcuts import get_object_or_404
 import google as genai
@@ -73,7 +73,10 @@ class WeeklyContentView(APIView):
     def get(self, request):
         week_number = request.query_params.get('week_number')
         if week_number:
-            content = WeeklyContent.objects.filter(week_number=week_number).first()
+            content = WeeklyContent.objects.filter(week_number=week_number).prefetch_related(
+                'materials__quiz__questions__options',
+                'flashcards'
+            ).first()
             if content:
                 # 1. haftayı buluyoruz (intro bilgilerini oradan kopyalamak için)
                 week_one = WeeklyContent.objects.filter(week_number=1).first()
@@ -92,7 +95,10 @@ class WeeklyContentView(APIView):
                 return Response(data, status=status.HTTP_200_OK)
             return Response({"detail": "Bu hafta henüz boş."}, status=status.HTTP_404_NOT_FOUND)
             
-        contents = WeeklyContent.objects.all().order_by('week_number')
+        contents = WeeklyContent.objects.prefetch_related(
+            'materials__quiz__questions__options',
+            'flashcards'
+        ).order_by('week_number')
         # Liste görünümünde de context verilmeli ki her hafta için kilit hesabı yapılabilsin
         serializer = WeeklyContentSerializer(contents, many=True, context={'request': request})
         return Response(serializer.data, status=status.HTTP_200_OK)
@@ -304,7 +310,7 @@ class StudentProgressListView(APIView):
     permission_classes = [IsAuthenticated]
 
     def get(self, request):
-        progresses = StudentProgress.objects.filter(student=request.user).order_by('weekly_content__week_number')
+        progresses = StudentProgress.objects.filter(student=request.user).select_related('weekly_content').order_by('weekly_content__week_number')
         serializer = StudentProgressSerializer(progresses, many=True)
         return Response(serializer.data)
 
@@ -365,15 +371,23 @@ class StudentAnalyticsView(APIView):
         if total_weeks_count == 0:
             total_weeks_count = 1 
 
-        students = User.objects.filter(is_staff=False, is_teacher=False).prefetch_related(
+        dept_param = request.query_params.get('department')
+
+        students = User.objects.filter(is_staff=False, is_teacher=False)
+        if dept_param and dept_param != 'all':
+            students = students.filter(department=dept_param)
+
+        students = students.prefetch_related(
             'studentprogress_set',
-            'timetracking_set'
+            'timetracking_set',
+            'studentquizattempt_set'
         ).order_by('first_name')
 
         analytics_data = []
         for s in students:
             progresses = list(s.studentprogress_set.all())
             trackings = list(s.timetracking_set.all())
+            attempts = list(s.studentquizattempt_set.all())
             
             total_seconds = sum(t.duration_seconds for t in trackings)
             
@@ -383,6 +397,16 @@ class StudentAnalyticsView(APIView):
             
             avg_progress = min(avg_progress, 100.0)
 
+            # Sınav Tahmin ve Gerçekleşen Skor Analizleri
+            if attempts:
+                avg_pred = round(sum(a.predicted_score for a in attempts) / len(attempts), 1)
+                avg_act = round(sum(a.score for a in attempts) / len(attempts), 1)
+                avg_diff = round(sum(a.score_difference for a in attempts) / len(attempts), 1)
+            else:
+                avg_pred = 0
+                avg_act = 0
+                avg_diff = 0
+
             analytics_data.append({
                 "id": str(s.id),
                 "first_name": s.first_name,
@@ -391,6 +415,10 @@ class StudentAnalyticsView(APIView):
                 "total_points": getattr(s, 'total_points', 0),
                 "total_time_spent": total_seconds,
                 "overall_progress": round(avg_progress, 1),
+                "avg_predicted": avg_pred,
+                "avg_actual": avg_act,
+                "avg_diff": avg_diff,
+                "total_quizzes_taken": len(attempts),
                 "weekly_breakdown": []
             })
 
@@ -429,8 +457,14 @@ class AIChatView(APIView):
             if week_id:
                 try:
                     WeeklyContent.objects.filter(id=week_id).exists()
-                    StudentQuestion.objects.create(student=request.user, weekly_content_id=week_id, question_text=user_message)
-                except: pass
+                    StudentQuestion.objects.create(
+                        student=request.user, 
+                        weekly_content_id=week_id, 
+                        question_text=user_message,
+                        response_text=ai_response_text
+                    )
+                except Exception as ex: 
+                    print(f"DEBUG: Chat Soru Kayıt Hatası -> {str(ex)}")
                 
             return Response({"response": ai_response_text}, status=200)
         except Exception as e:
@@ -466,6 +500,12 @@ class QuizSubmitView(APIView):
             )
 
         answers_data = request.data.get('answers', [])
+        predicted_score_val = request.data.get('predicted_score', 0)
+        try:
+            predicted_score_val = max(0, min(100, int(predicted_score_val)))
+        except (ValueError, TypeError):
+            predicted_score_val = 0
+
         correct_count = 0
         
         # 4. Sınav denemesini (Attempt) aktif tura göre oluştur
@@ -473,6 +513,8 @@ class QuizSubmitView(APIView):
             student=request.user, 
             quiz=quiz, 
             score=0, 
+            predicted_score=predicted_score_val,
+            score_difference=0,
             correct_answers=0, 
             wrong_answers=0,
             attempt_round=current_round # Hangi turda olduğu kaydediliyor
@@ -502,16 +544,27 @@ class QuizSubmitView(APIView):
         # 6. Skor hesapla ve kaydet
         total_questions = quiz.questions.count()
         attempt.score = round((correct_count / total_questions) * 100) if total_questions > 0 else 0
+        attempt.score_difference = attempt.score - attempt.predicted_score
         attempt.correct_answers = correct_count
         attempt.wrong_answers = total_questions - correct_count
         attempt.save()
 
         # 7. Sınav materyalini BU TUR için tamamlandı işaretle
-        CompletedMaterial.objects.get_or_create(
+        comp_mat, comp_created = CompletedMaterial.objects.get_or_create(
             student=request.user, 
             material=quiz.material,
             attempt_round=current_round
         )
+
+        points_earned = 0
+        if comp_created and current_round == 1:
+            actual_point = quiz.material.point_value
+            if actual_point == 10 or actual_point == 0:
+                points_earned = 1
+            else:
+                points_earned = actual_point
+            request.user.total_points += points_earned
+            request.user.save()
         
         # 8. İlerleme durumunu güncelle (Round yükseltme BURADA YAPILMIYOR)
         total_mats = weekly_content.materials.count()
@@ -529,9 +582,13 @@ class QuizSubmitView(APIView):
         return Response({
             "attempt_id": str(attempt.id),
             "score": attempt.score,
+            "predicted_score": attempt.predicted_score,
+            "score_difference": attempt.score_difference,
             "correct": attempt.correct_answers,
             "wrong": attempt.wrong_answers,
             "current_round": current_round,
+            "points_earned": points_earned,
+            "total_points": request.user.total_points,
             "is_completed": progress.is_completed
         }, status=status.HTTP_201_CREATED)
 class QuizLastAttemptView(APIView):
@@ -544,6 +601,8 @@ class QuizLastAttemptView(APIView):
             return Response({
                 "id": str(attempt.id), 
                 "score": attempt.score,
+                "predicted_score": attempt.predicted_score,
+                "score_difference": attempt.score_difference,
                 "correct": attempt.correct_answers,
                 "wrong": attempt.wrong_answers,     
                 "correct_answers": attempt.correct_answers,
@@ -587,7 +646,15 @@ class QuizAIAnalysisView(APIView):
             combined_analysis = ""
             user_name = request.user.first_name if request.user.first_name else request.user.username
             
+            pred = attempt.predicted_score
+            actual = attempt.score
+            diff = attempt.score_difference
+            diff_sign = f"+{diff}" if diff > 0 else f"{diff}"
+
             combined_analysis += f"Merhaba {user_name}, bu testteki performansını senin için analiz ettim:\n\n"
+            combined_analysis += f"🎯 Hedef/Tahmin Skorun: %{pred}\n"
+            combined_analysis += f"📊 Gerçekleşen Skorun: %{actual}\n"
+            combined_analysis += f"⚡ Skor Sapması / Fark: {diff_sign} Puan\n\n"
 
             for ans in wrong_answers:
                 # Soru bazlı hazır açıklamayı (explanation) çekiyoruz
@@ -602,7 +669,10 @@ class QuizAIAnalysisView(APIView):
 
             return Response({
                 "ai_feedback": combined_analysis, # İsim aynı kalsın ki frontend kırılmasın
-                "current_round": progress.current_attempt_round
+                "current_round": progress.current_attempt_round,
+                "score": attempt.score,
+                "predicted_score": attempt.predicted_score,
+                "score_difference": attempt.score_difference
             }, status=200)
             
         except Exception as e: 
@@ -642,7 +712,9 @@ class BulkAcademicReportView(APIView):
             student_progresses = list(student.studentprogress_set.all())
 
             weekly_stats = []
-            overall_total_seconds = sum(t.duration_seconds for t in student_trackings)
+            overall_total_seconds_1 = sum(t.duration_seconds for t in student_trackings if t.attempt_round == 1)
+            overall_total_seconds_2 = sum(t.duration_seconds for t in student_trackings if t.attempt_round == 2)
+            overall_total_seconds = overall_total_seconds_1 + overall_total_seconds_2
             
             for i in range(1, 15):
                 week_content = week_map.get(i)
@@ -655,15 +727,18 @@ class BulkAcademicReportView(APIView):
                 attempt_1 = next((a for a in student_attempts if a.quiz.material.parent_content_id == w_id and a.attempt_round == 1), None)
                 attempt_2 = next((a for a in student_attempts if a.quiz.material.parent_content_id == w_id and a.attempt_round == 2), None)
                 
-                # --- MATERYAL DETAYLARI (Hafızadan Filtrele) ---
+                # --- MATERYAL DETAYLARI (Hafızadan Filtrele - T1 ve T2 Ayrımıyla) ---
                 material_details = []
                 if week_content:
                     for m in week_content.materials.all():
-                        m_duration = sum(t.duration_seconds for t in student_trackings if t.material_id == m.id)
+                        m_duration_1 = sum(t.duration_seconds for t in student_trackings if t.material_id == m.id and t.attempt_round == 1)
+                        m_duration_2 = sum(t.duration_seconds for t in student_trackings if t.material_id == m.id and t.attempt_round == 2)
                         material_details.append({
                             "title": m.title,
                             "content_type": m.content_type,
-                            "duration_seconds": m_duration
+                            "duration_seconds_1": m_duration_1,
+                            "duration_seconds_2": m_duration_2,
+                            "duration_seconds": m_duration_1 + m_duration_2
                         })
 
                 # --- İLERLEME (Hafızadan Filtrele) ---
@@ -678,13 +753,26 @@ class BulkAcademicReportView(APIView):
                     "correct": attempt_1.correct_answers if attempt_1 else 0,
                     "wrong": attempt_1.wrong_answers if attempt_1 else 0,
                     "score_1": attempt_1.score if attempt_1 else 0,
+                    "predicted_1": attempt_1.predicted_score if attempt_1 else 0,
+                    "diff_1": attempt_1.score_difference if attempt_1 else 0,
                     "duration_seconds_2": duration_2,
                     "correct_2": attempt_2.correct_answers if attempt_2 else 0,
                     "wrong_2": attempt_2.wrong_answers if attempt_2 else 0,
                     "score_2": attempt_2.score if attempt_2 else 0,
+                    "predicted_2": attempt_2.predicted_score if attempt_2 else 0,
+                    "diff_2": attempt_2.score_difference if attempt_2 else 0,
                     "has_quiz": True if (attempt_1 or attempt_2) else False,
                     "is_round_2_started": True if (duration_2 > 0 or attempt_2) else False
                 })
+
+            if student_attempts:
+                stu_avg_pred = round(sum(a.predicted_score for a in student_attempts) / len(student_attempts), 1)
+                stu_avg_act = round(sum(a.score for a in student_attempts) / len(student_attempts), 1)
+                stu_avg_diff = round(sum(a.score_difference for a in student_attempts) / len(student_attempts), 1)
+            else:
+                stu_avg_pred = 0
+                stu_avg_act = 0
+                stu_avg_diff = 0
 
             report_data.append({
                 "id": str(student.id),
@@ -692,7 +780,12 @@ class BulkAcademicReportView(APIView):
                 "email": student.email,
                 "department": student.department,
                 "total_points": getattr(student, 'total_points', 0),
+                "total_time_1": overall_total_seconds_1,
+                "total_time_2": overall_total_seconds_2,
                 "total_time": overall_total_seconds,
+                "avg_predicted": stu_avg_pred,
+                "avg_actual": stu_avg_act,
+                "avg_diff": stu_avg_diff,
                 "weekly_breakdown": weekly_stats
             })
 
@@ -846,3 +939,98 @@ class SystemTimeAnalyticsView(APIView):
                 } for idx, s in enumerate(student_totals[:15])
             ]
         })
+
+
+class ChatbotAnalyticsView(APIView):
+    permission_classes = [permissions.IsAdminUser]
+
+    def get(self, request):
+        dept = request.query_params.get('department')
+        
+        # 1. İlgili öğrencileri çek
+        students = User.objects.filter(is_staff=False, is_teacher=False)
+        if dept and dept != 'all':
+            students = students.filter(department=dept)
+        
+        students = students.order_by('first_name', 'last_name')
+        
+        # 2. Bu öğrencilere ait soru kayıtlarını çek
+        questions = StudentQuestion.objects.filter(
+            student__in=students
+        ).select_related('student', 'weekly_content').order_by('-created_at')
+        
+        total_questions = questions.count()
+        active_users_count = questions.values('student').distinct().count()
+        total_users_count = students.count()
+        
+        # 3. Öğrenci bazında soruları grupla
+        questions_by_student = {}
+        for q in questions:
+            s_id = str(q.student_id)
+            if s_id not in questions_by_student:
+                questions_by_student[s_id] = []
+            
+            created_str = q.created_at.strftime("%d.%m.%Y / %H:%M") if q.created_at else ""
+            questions_by_student[s_id].append({
+                "id": q.id,
+                "week_number": q.weekly_content.week_number if q.weekly_content else 1,
+                "week_title": q.weekly_content.title if q.weekly_content else "",
+                "question_text": q.question_text,
+                "response_text": q.response_text or "Henüz yanıt kaydedilmemiş.",
+                "created_at": created_str,
+                "created_at_iso": q.created_at.isoformat() if q.created_at else ""
+            })
+            
+        students_data = []
+        for s in students:
+            s_id = str(s.id)
+            s_questions = questions_by_student.get(s_id, [])
+            students_data.append({
+                "id": s_id,
+                "first_name": s.first_name,
+                "last_name": s.last_name,
+                "department": s.department,
+                "question_count": len(s_questions),
+                "questions": s_questions
+            })
+            
+        # Çok soru sorandan aza doğru sıralayalım
+        students_data.sort(key=lambda x: (-x['question_count'], x['first_name']))
+
+        return Response({
+            "total_questions": total_questions,
+            "active_users_count": active_users_count,
+            "total_users_count": total_users_count,
+            "students": students_data
+        }, status=200)
+
+
+class DepartmentListView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        counts = dict(
+            User.objects.filter(is_staff=False, is_teacher=False, department__isnull=False)
+            .values('department')
+            .annotate(count=Count('id'))
+            .values_list('department', 'count')
+        )
+        
+        dept_choices = dict(User.DEPARTMENT_CHOICES)
+        result = []
+        for key, name in User.DEPARTMENT_CHOICES:
+            result.append({
+                "key": key,
+                "name": name,
+                "student_count": counts.get(key, 0)
+            })
+            
+        for key, count in counts.items():
+            if key and key not in dept_choices:
+                result.append({
+                    "key": key,
+                    "name": key.replace('_', ' ').title(),
+                    "student_count": count
+                })
+                
+        return Response(result, status=200)

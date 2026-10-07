@@ -6,6 +6,7 @@ urlpatterns = [
     path('track-activity/', TrackActivityView.as_view(), name='track_activity'),
     # Hem öğrencilerin listelemesi hem de hocaların içerik eklemesi için ortak endpoint
     path('list/', WeeklyContentView.as_view(), name='weekly_contents_list'),
+    path('manage/', WeeklyContentView.as_view(), name='weekly_contents_manage'),
     
     # Belirli bir haftanın detaylarını (video ve podcast listesini) getirmek için
     path('week/<int:week_number>/', ContentDetailView.as_view(), name='week_detail'),

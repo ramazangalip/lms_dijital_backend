@@ -3,14 +3,9 @@ from django.contrib.auth.models import AbstractUser
 
 class User(AbstractUser):
     DEPARTMENT_CHOICES = [
-        ('ilahiyat', 'İlahiyat'),
-        ('isg', 'İş Sağlığı Ve Güvenliği'),
-        ('beslenmevediyetetik', 'Beslenme Ve Diyetetik'),
-        ('hemsirelik', 'Hemşirelik'),
-        ('saglikyonetimi', 'Sağlık Yönetimi'),
-        ('webtasarimvekodlama', 'Web Tasarım Ve Kodlama'),
-
-        
+        ('siyasetbilimivekamuyonetimi', 'Siyaset Bilimi Ve Kamu Yönetimi'),
+        ('turkdiliveedebiyati', 'Türk Dili Ve Edebiyatı'),
+        ('matematik', 'Matematik'),
     ]
 
     email = models.EmailField(unique=True, verbose_name="E-posta Adresi")
@@ -24,6 +19,12 @@ class User(AbstractUser):
         null=True, 
         blank=True, 
         verbose_name="Bölüm"
+    )
+    category = models.CharField(
+        max_length=100,
+        null=True,
+        blank=True,
+        verbose_name="Kategori"
     )
     total_points = models.PositiveIntegerField(default=0, verbose_name="Toplam Puan")
     
@@ -42,6 +43,7 @@ class User(AbstractUser):
             models.Index(fields=['is_staff', 'is_teacher', 'department']),
             models.Index(fields=['is_student', 'department']),
             models.Index(fields=['department', 'total_points']),
+            models.Index(fields=['category']),
         ]
 
 

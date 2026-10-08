@@ -14,6 +14,12 @@ class WeeklyContent(models.Model):
         verbose_name="Erişime Açılma Tarihi",
         help_text="Bu tarih gelmeden öğrenci içeriğe erişemez."
     )
+    deactivation_date = models.DateTimeField(
+        null=True, 
+        blank=True, 
+        verbose_name="Pasif Etme / Kapanma Tarihi",
+        help_text="Bu tarih geçtikten sonra öğrenci içeriğe erişemez."
+    )
     
 
     intro_title = models.CharField(max_length=255, default="Genel Tanıtım", verbose_name="Tanıtım Başlığı")
@@ -27,10 +33,52 @@ class WeeklyContent(models.Model):
         indexes = [
             models.Index(fields=['week_number']),
             models.Index(fields=['release_date']),
+            models.Index(fields=['deactivation_date']),
         ]
 
     def __str__(self):
         return f"Hafta {self.week_number} - {self.title}"
+
+class WeeklyContentDepartmentSchedule(models.Model):
+    """
+    Bölüm Bazlı Hafta Erişim ve Pasif Etme Tarihleri
+    Her haftanın her bölüm için ayrı açılış ve kapanış tarihleri olabilir.
+    """
+    weekly_content = models.ForeignKey(
+        WeeklyContent, 
+        related_name='department_schedules', 
+        on_delete=models.CASCADE,
+        verbose_name="Haftalık İçerik"
+    )
+    department = models.CharField(
+        max_length=50, 
+        choices=User.DEPARTMENT_CHOICES, 
+        verbose_name="Bölüm"
+    )
+    release_date = models.DateTimeField(
+        null=True, 
+        blank=True, 
+        verbose_name="Erişime Açılma Tarihi",
+        help_text="Bu tarih gelmeden ilgili bölümdeki öğrenci içeriğe erişemez."
+    )
+    deactivation_date = models.DateTimeField(
+        null=True, 
+        blank=True, 
+        verbose_name="Pasif Etme / Kapanma Tarihi",
+        help_text="Bu tarih geçtikten sonra ilgili bölümdeki öğrenci içeriğe erişemez."
+    )
+
+    class Meta:
+        verbose_name = "Bölüm Bazlı Hafta Tarih Ayarı"
+        verbose_name_plural = "Bölüm Bazlı Hafta Tarih Ayarları"
+        unique_together = ('weekly_content', 'department')
+        indexes = [
+            models.Index(fields=['weekly_content', 'department']),
+            models.Index(fields=['department', 'release_date', 'deactivation_date']),
+        ]
+
+    def __str__(self):
+        return f"{self.weekly_content.week_number}. Hafta - {self.get_department_display()} ({self.release_date} - {self.deactivation_date})"
 
 class IntroVideoCompletion(models.Model):
     """
@@ -77,6 +125,7 @@ class Material(models.Model):
     
    
     point_value = models.PositiveIntegerField(default=1, verbose_name="Tamamlama Puanı")
+    duration_seconds = models.PositiveIntegerField(default=120, null=True, blank=True, verbose_name="Tamamlama Süresi (Saniye)")
 
     class Meta:
         verbose_name = "Materyal"

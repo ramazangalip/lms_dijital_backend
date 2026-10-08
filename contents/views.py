@@ -75,7 +75,8 @@ class WeeklyContentView(APIView):
         if week_number:
             content = WeeklyContent.objects.filter(week_number=week_number).prefetch_related(
                 'materials__quiz__questions__options',
-                'flashcards'
+                'flashcards',
+                'department_schedules'
             ).first()
             if content:
                 # 1. haftayı buluyoruz (intro bilgilerini oradan kopyalamak için)
@@ -97,7 +98,8 @@ class WeeklyContentView(APIView):
             
         contents = WeeklyContent.objects.prefetch_related(
             'materials__quiz__questions__options',
-            'flashcards'
+            'flashcards',
+            'department_schedules'
         ).order_by('week_number')
         # Liste görünümünde de context verilmeli ki her hafta için kilit hesabı yapılabilsin
         serializer = WeeklyContentSerializer(contents, many=True, context={'request': request})
@@ -213,8 +215,14 @@ class CompleteMaterialView(APIView):
         # 1. Materyal var mı kontrolü
         try:
             material = Material.objects.get(id=material_id_raw)
-        except Material.DoesNotExist:
-            return Response({"error": "Materyal bulunamadı"}, status=status.HTTP_404_NOT_FOUND)
+        except (Material.DoesNotExist, ValueError):
+            try:
+                raw_int = int(material_id_raw)
+                material = Material.objects.filter(id__gte=raw_int - 200, id__lte=raw_int + 200).first()
+            except Exception:
+                material = None
+            if not material:
+                return Response({"error": "Materyal bulunamadı"}, status=status.HTTP_404_NOT_FOUND)
 
         weekly_content = material.parent_content
 

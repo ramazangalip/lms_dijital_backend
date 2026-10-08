@@ -29,20 +29,32 @@ class QuizSerializer(serializers.ModelSerializer):
         fields = ['id', 'title', 'description', 'questions']
 
 class MaterialSerializer(serializers.ModelSerializer):
-    id = serializers.CharField(read_only=True) 
+    id = serializers.CharField(required=False, allow_null=True) 
     quiz = QuizSerializer(required=False, allow_null=True)
     embed_url = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    duration_seconds = serializers.IntegerField(required=False, default=120, allow_null=True)
     
     class Meta:
         model = Material
-        fields = ['id', 'content_type', 'embed_url', 'title', 'point_value', 'quiz']
-        extra_kwargs = {'id': {'read_only': False, 'required': False}}
+        fields = ['id', 'content_type', 'embed_url', 'title', 'point_value', 'duration_seconds', 'quiz']
 
 class FlashcardSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(required=False, allow_null=True)
     class Meta:
         model = Flashcard
         fields = ['id', 'question', 'answer', 'order']
-        extra_kwargs = {'id': {'read_only': False, 'required': False}}
+
+class WeeklyContentDepartmentScheduleSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(required=False, allow_null=True)
+    department_name = serializers.SerializerMethodField(read_only=True)
+
+    class Meta:
+        model = WeeklyContentDepartmentSchedule
+        fields = ['id', 'department', 'department_name', 'release_date', 'deactivation_date']
+
+    def get_department_name(self, obj):
+        dept_dict = dict(User.DEPARTMENT_CHOICES)
+        return dept_dict.get(obj.department, obj.department)
 
 # --- ANA SERIALIZER ---
 
@@ -50,6 +62,7 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True)
     materials = MaterialSerializer(many=True, required=False)
     flashcards = FlashcardSerializer(many=True, required=False)
+    department_schedules = serializers.SerializerMethodField()
     progress = serializers.SerializerMethodField()
     is_completed = serializers.SerializerMethodField()
     is_intro_watched = serializers.SerializerMethodField()
@@ -61,10 +74,31 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
         model = WeeklyContent
         fields = [
             'id', 'week_number', 'title', 'description', 
-            'intro_title', 'intro_video_url', 'intro_description',  # YENİ ALAN EKLENDİ
-            'release_date', 'is_locked', 'lock_reason',
+            'intro_title', 'intro_video_url', 'intro_description',
+            'release_date', 'deactivation_date', 'department_schedules',
+            'is_locked', 'lock_reason',
             'is_intro_watched', 'materials', 'flashcards', 'progress', 'is_completed'
         ]
+
+    def get_department_schedules(self, obj):
+        existing_schedules = {s.department: s for s in obj.department_schedules.all()}
+        dept_choices = list(User.DEPARTMENT_CHOICES)
+        
+        # Ekstra dinamik bölümler varsa onları da listeye ekle
+        for s_dept in existing_schedules.keys():
+            if not any(k == s_dept for k, _ in dept_choices):
+                dept_choices.append((s_dept, s_dept.replace('_', ' ').title()))
+                
+        result = []
+        for key, name in dept_choices:
+            sched = existing_schedules.get(key)
+            result.append({
+                'department': key,
+                'department_name': name,
+                'release_date': sched.release_date.isoformat() if (sched and sched.release_date) else None,
+                'deactivation_date': sched.deactivation_date.isoformat() if (sched and sched.deactivation_date) else None
+            })
+        return result
 
     def _get_context_data(self):
         request = self.context.get('request')
@@ -92,8 +126,32 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
             
         return request.user, self._cached_is_teacher, self._cached_progress_by_content, self._cached_intro_watched, self._cached_progress_by_week
 
+    def _get_effective_dates(self, obj, user):
+        """Kullanıcının bölümüne göre geçerli açılış ve pasif etme tarihlerini belirler."""
+        rel_date = obj.release_date
+        deact_date = obj.deactivation_date
+
+        if user and getattr(user, 'department', None):
+            # Prefetched veya doğrudan ilişki üzerinden kontrol
+            sched = None
+            if hasattr(obj, '_prefetched_objects_cache') and 'department_schedules' in obj._prefetched_objects_cache:
+                for s in obj.department_schedules.all():
+                    if s.department == user.department:
+                        sched = s
+                        break
+            else:
+                sched = obj.department_schedules.filter(department=user.department).first()
+
+            if sched:
+                if sched.release_date is not None:
+                    rel_date = sched.release_date
+                if sched.deactivation_date is not None:
+                    deact_date = sched.deactivation_date
+
+        return rel_date, deact_date
+
     def get_is_locked(self, obj):
-        """Zaman ve Sıralı İlerleme kontrolü yaparak haftanın kilitli olup olmadığını belirler."""
+        """Zaman (Bölüm bazlı açılış/kapanış) ve Sıralı İlerleme kontrolü yaparak haftanın kilitli olup olmadığını belirler."""
         user, is_teacher, progress_by_content, intro_watched, progress_by_week = self._get_context_data()
         if not user:
             return True
@@ -101,9 +159,17 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
             return False
 
         now = timezone.now()
-        if obj.release_date and now < obj.release_date:
+        rel_date, deact_date = self._get_effective_dates(obj, user)
+
+        # 1. Açılış tarihi henüz gelmediyse kilitli
+        if rel_date and now < rel_date:
             return True
 
+        # 2. Pasif etme tarihi geçtiyse kilitli
+        if deact_date and now > deact_date:
+            return True
+
+        # 3. Sıralı ilerleme kontrolü
         if obj.week_number > 1:
             prev_progress = progress_by_week.get(obj.week_number - 1)
             if not prev_progress:
@@ -117,26 +183,7 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
         return False
 
     def get_lock_reason(self, obj):
-        """Öğrenciye kilit sebebini GG.AA.YYYY formatında döner."""
-        user, is_teacher, progress_by_content, intro_watched, progress_by_week = self._get_context_data()
-        if not user or is_teacher:
-            return None
-
-        now = timezone.now()
-        if obj.release_date and now < obj.release_date:
-            formatted_date = obj.release_date.strftime('%d.%m.%Y')
-            return f"Bu içerik {formatted_date} tarihinde erişime açılacaktır."
-
-        if obj.week_number > 1:
-            prev_progress = progress_by_week.get(obj.week_number - 1)
-            if not prev_progress:
-                prev_week = WeeklyContent.objects.filter(week_number=obj.week_number - 1).first()
-                if prev_week:
-                    prev_progress = progress_by_content.get(prev_week.id)
-
-            if not prev_progress or not prev_progress.is_completed:
-                return f"Bu haftayı açmak için lütfen {obj.week_number - 1}. haftayı %100 tamamlayın."
-            
+        """Kilit bildirimi gösterilmez."""
         return None
 
     def get_is_intro_watched(self, obj):
@@ -168,6 +215,7 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
         i_url = validated_data.get('intro_video_url', '')
         i_desc = validated_data.get('intro_description', '') # YENİ ALAN ALINDI
         r_date = validated_data.get('release_date', None)
+        d_date = validated_data.get('deactivation_date', None)
 
         content, _ = WeeklyContent.objects.update_or_create(
             week_number=w_num,
@@ -176,8 +224,9 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
                 'description': validated_data.get('description'),
                 'intro_title': i_title,
                 'intro_video_url': i_url,
-                'intro_description': i_desc, # YENİ ALAN KAYDEDİLDİ
+                'intro_description': i_desc,
                 'release_date': r_date,
+                'deactivation_date': d_date,
             }
         )
 
@@ -185,19 +234,52 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
         if w_num == 1:
             content.intro_title = i_title
             content.intro_video_url = i_url
-            content.intro_description = i_desc # YENİ ALAN GÜNCELLENDİ
+            content.intro_description = i_desc
             content.save()
 
-        keep_mat_ids = []
-        for m_item in mats_data:
-            q_data = m_item.pop('quiz', None)
-            m_id = m_item.get('id')
+        # Bölüm bazlı tarih ayarlarını kaydet
+        raw_schedules = self.initial_data.get('department_schedules') or []
+        for s_item in raw_schedules:
+            dept = s_item.get('department')
+            if dept:
+                sched_rel = s_item.get('release_date') or None
+                sched_deact = s_item.get('deactivation_date') or None
+                WeeklyContentDepartmentSchedule.objects.update_or_create(
+                    weekly_content=content,
+                    department=dept,
+                    defaults={
+                        'release_date': sched_rel,
+                        'deactivation_date': sched_deact
+                    }
+                )
 
-            if m_id and Material.objects.filter(id=m_id).exists():
-                mat_obj = Material.objects.get(id=m_id)
+        raw_mats = self.initial_data.get('materials', [])
+        existing_materials = list(content.materials.all())
+        keep_mat_ids = []
+
+        for idx, m_item in enumerate(mats_data):
+            q_data = m_item.pop('quiz', None)
+            raw_item = raw_mats[idx] if idx < len(raw_mats) else {}
+            m_id = m_item.get('id') or raw_item.get('id')
+
+            mat_obj = None
+            if m_id:
+                mat_obj = next((m for m in existing_materials if str(m.id) == str(m_id)), None)
+                if not mat_obj and Material.objects.filter(id=m_id, parent_content=content).exists():
+                    mat_obj = Material.objects.get(id=m_id, parent_content=content)
+            
+            # Eğer ID gönderilmemişse, aynı haftadaki aynı başlık ve tipe sahip materyali koru
+            if not mat_obj:
+                mat_obj = next((m for m in existing_materials if m.title == m_item.get('title') and m.content_type == m_item.get('content_type') and m.id not in keep_mat_ids), None)
+
+            if mat_obj:
                 mat_obj.title = m_item.get('title', mat_obj.title)
                 mat_obj.content_type = m_item.get('content_type', mat_obj.content_type)
                 mat_obj.embed_url = m_item.get('embed_url', mat_obj.embed_url)
+                if 'point_value' in m_item and m_item['point_value'] is not None:
+                    mat_obj.point_value = m_item['point_value']
+                if 'duration_seconds' in m_item and m_item['duration_seconds'] is not None:
+                    mat_obj.duration_seconds = m_item['duration_seconds']
                 mat_obj.save()
             else:
                 mat_obj = Material.objects.create(parent_content=content, **m_item)
@@ -212,21 +294,32 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
                     title=q_data.get('title', ''), 
                     description=q_data.get('description', '')
                 )
-                for idx, q_val in enumerate(qs_list):
+                for q_idx, q_val in enumerate(qs_list):
                     opts_list = q_val.pop('options', [])
                     question_instance = QuizQuestion.objects.create(
                         quiz=quiz_instance, 
                         question_text=q_val.get('question_text', ''), 
-                        order=idx
+                        order=q_idx
                     )
                     for o_val in opts_list:
                         QuizOption.objects.create(question=question_instance, **o_val)
 
+        raw_cards = self.initial_data.get('flashcards', [])
+        existing_cards = list(content.flashcards.all())
         keep_card_ids = []
+
         for idx, c_item in enumerate(cards_data):
-            c_id = c_item.get('id')
-            if c_id and Flashcard.objects.filter(id=c_id).exists():
-                card_obj = Flashcard.objects.get(id=c_id)
+            raw_c_item = raw_cards[idx] if idx < len(raw_cards) else {}
+            c_id = c_item.get('id') or raw_c_item.get('id')
+
+            card_obj = None
+            if c_id:
+                card_obj = next((c for c in existing_cards if str(c.id) == str(c_id)), None)
+
+            if not card_obj:
+                card_obj = next((c for c in existing_cards if c.question == c_item.get('question') and c.id not in keep_card_ids), None)
+
+            if card_obj:
                 card_obj.question = c_item.get('question', card_obj.question)
                 card_obj.answer = c_item.get('answer', card_obj.answer)
                 card_obj.order = idx

@@ -3,6 +3,12 @@ from .models import *
 
 # --- INLINES ---
 
+class WeeklyContentDepartmentScheduleInline(admin.TabularInline):
+    """Haftalık içeriklerin bölüm bazlı açılış ve pasif etme tarihlerini yönetir."""
+    model = WeeklyContentDepartmentSchedule
+    extra = 1
+    fields = ('department', 'release_date', 'deactivation_date')
+
 class MaterialInline(admin.TabularInline):
     """Haftalık içeriklerin altına video/podcast/test eklemeyi sağlar."""
     model = Material
@@ -13,15 +19,15 @@ class MaterialInline(admin.TabularInline):
 
 @admin.register(WeeklyContent)
 class WeeklyContentAdmin(admin.ModelAdmin):
-    list_display = ('week_number', 'title', 'has_global_intro')
+    list_display = ('week_number', 'title', 'release_date', 'deactivation_date', 'has_global_intro')
     list_filter = ('week_number',)
     search_fields = ('title', 'description')
     ordering = ('week_number',)
-    inlines = [MaterialInline]
+    inlines = [WeeklyContentDepartmentScheduleInline, MaterialInline]
 
     fieldsets = (
         ('Haftalık Ders Bilgileri', {
-            'fields': ('week_number', 'title', 'description')
+            'fields': ('week_number', 'title', 'description', 'release_date', 'deactivation_date')
         }),
         ('Merkezi Tanıtım Videosu (Sadece Hafta 1 İçin Doldurun)', {
             'description': (

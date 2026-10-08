@@ -4,6 +4,27 @@ from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from .models import User, EmailOTP
 
 class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
+    default_error_messages = {
+        'no_active_account': 'Email veya şifreniz yanlıştır.'
+    }
+
+    def validate(self, attrs):
+        try:
+            data = super().validate(attrs)
+        except Exception:
+            raise serializers.ValidationError({
+                "detail": "Email veya şifreniz yanlıştır."
+            })
+
+        # Kullanıcı bilgileri doğru, kategori d1 ise yönlendirme uyarısı ver
+        if getattr(self.user, 'category', None) == 'd1':
+            raise serializers.ValidationError({
+                "detail": "yapayzekadesteklisinif.com.tr den giriş yapmayı deneyiniz.",
+                "code": "category_d1"
+            })
+
+        return data
+
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
@@ -12,6 +33,7 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
         token['is_teacher'] = user.is_teacher
         token['is_student'] = user.is_student
         token['department'] = user.department  
+        token['category'] = getattr(user, 'category', None)
         token['full_name'] = f"{user.first_name} {user.last_name}"
         
         return token

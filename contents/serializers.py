@@ -65,6 +65,7 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
     department_schedules = serializers.SerializerMethodField()
     progress = serializers.SerializerMethodField()
     is_completed = serializers.SerializerMethodField()
+    current_attempt_round = serializers.SerializerMethodField()
     is_intro_watched = serializers.SerializerMethodField()
     is_locked = serializers.SerializerMethodField()
     lock_reason = serializers.SerializerMethodField()
@@ -77,7 +78,7 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
             'intro_title', 'intro_video_url', 'intro_description',
             'release_date', 'deactivation_date', 'department_schedules',
             'is_locked', 'lock_reason',
-            'is_intro_watched', 'materials', 'flashcards', 'progress', 'is_completed'
+            'is_intro_watched', 'materials', 'flashcards', 'progress', 'is_completed', 'current_attempt_round'
         ]
 
     def get_department_schedules(self, obj):
@@ -205,6 +206,13 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
             return False
         prog = progress_by_content.get(obj.id)
         return prog.is_completed if prog else False
+
+    def get_current_attempt_round(self, obj):
+        user, is_teacher, progress_by_content, intro_watched, progress_by_week = self._get_context_data()
+        if not user:
+            return 1
+        prog = progress_by_content.get(obj.id)
+        return prog.current_attempt_round if prog else 1
 
     def create(self, validated_data):
         mats_data = validated_data.pop('materials', [])
@@ -464,9 +472,20 @@ class StudentAnalyticsSerializer(serializers.ModelSerializer):
                 quiz_1 = quiz_by_week_round.get((week.id, 1))
                 quiz_2 = quiz_by_week_round.get((week.id, 2))
                 prog_obj = progress_by_week.get(week.id)
+                current_round = prog_obj.current_attempt_round if prog_obj else 1
+
+                w_mats = materials_by_week.get(week.id, [])
+                total_w_mats = len(w_mats)
+                w_mat_ids = {m.id for m in w_mats}
+                
+                done_count_1 = len([cm for cm in completed_materials if cm['material_id'] in w_mat_ids and cm['attempt_round'] == 1])
+                prog_1 = round((done_count_1 / total_w_mats) * 100) if total_w_mats > 0 else 0
+
+                done_count_2 = len([cm for cm in completed_materials if cm['material_id'] in w_mat_ids and cm['attempt_round'] == 2])
+                prog_2 = round((done_count_2 / total_w_mats) * 100) if total_w_mats > 0 else 0
 
                 material_details = []
-                for m in materials_by_week.get(week.id, []):
+                for m in w_mats:
                     material_details.append({
                         "title": m.title,
                         "content_type": m.content_type,
@@ -475,7 +494,10 @@ class StudentAnalyticsSerializer(serializers.ModelSerializer):
 
                 breakdown.append({
                     "week_number": week.week_number,
-                    "progress": prog_obj.completion_percentage if prog_obj else 0,
+                    "progress": prog_1,
+                    "progress_1": prog_1,
+                    "progress_2": prog_2,
+                    "current_round": current_round,
                     "duration": total_sec_1 + total_sec_2,
                     "duration_seconds": total_sec_1 + total_sec_2,
                     "material_details": material_details,
@@ -526,7 +548,7 @@ class StudentProgressSerializer(serializers.ModelSerializer):
     
     class Meta:
         model = StudentProgress
-        fields = ['id', 'weekly_content', 'week_number', 'week_title', 'is_completed', 'completion_percentage', 'last_accessed']
+        fields = ['id', 'weekly_content', 'week_number', 'week_title', 'is_completed', 'completion_percentage', 'current_attempt_round', 'last_accessed']
 
 class AIChatSerializer(serializers.Serializer):
     message = serializers.CharField(required=True, min_length=1)

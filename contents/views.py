@@ -801,7 +801,8 @@ class BulkAcademicReportView(APIView):
         ).prefetch_related(
             'timetracking_set', 
             'studentquizattempt_set__quiz__material__parent_content',
-            'studentprogress_set'
+            'studentprogress_set',
+            'completedmaterial_set'
         ).order_by('first_name')
 
         # 2. ADIM: Tüm haftalık içerikleri ve materyalleri hafızaya al
@@ -816,6 +817,7 @@ class BulkAcademicReportView(APIView):
             student_trackings = list(student.timetracking_set.all())
             student_attempts = list(student.studentquizattempt_set.all())
             student_progresses = list(student.studentprogress_set.all())
+            student_completed = list(student.completedmaterial_set.all())
 
             weekly_stats = []
             overall_total_seconds_1 = sum(t.duration_seconds for t in student_trackings if t.attempt_round == 1)
@@ -835,8 +837,12 @@ class BulkAcademicReportView(APIView):
                 
                 # --- MATERYAL DETAYLARI (Hafızadan Filtrele - T1 ve T2 Ayrımıyla) ---
                 material_details = []
+                week_mats = list(week_content.materials.all()) if week_content else []
+                total_week_mats = len(week_mats)
+                week_mat_ids = {m.id for m in week_mats}
+
                 if week_content:
-                    for m in week_content.materials.all():
+                    for m in week_mats:
                         m_duration_1 = sum(t.duration_seconds for t in student_trackings if t.material_id == m.id and t.attempt_round == 1)
                         m_duration_2 = sum(t.duration_seconds for t in student_trackings if t.material_id == m.id and t.attempt_round == 2)
                         material_details.append({
@@ -847,13 +853,23 @@ class BulkAcademicReportView(APIView):
                             "duration_seconds": m_duration_1 + m_duration_2
                         })
 
-                # --- İLERLEME (Hafızadan Filtrele) ---
+                # --- İLERLEME (T1 ve T2 Bağımsız Hesaplanır) ---
+                done_count_1 = len([cm for cm in student_completed if cm.material_id in week_mat_ids and cm.attempt_round == 1])
+                prog_1 = round((done_count_1 / total_week_mats) * 100) if total_week_mats > 0 else 0
+
+                done_count_2 = len([cm for cm in student_completed if cm.material_id in week_mat_ids and cm.attempt_round == 2])
+                prog_2 = round((done_count_2 / total_week_mats) * 100) if total_week_mats > 0 else 0
+
                 progress_record = next((p for p in student_progresses if p.weekly_content_id == w_id), None)
-                progress_value = progress_record.completion_percentage if progress_record else 0
+                current_round = progress_record.current_attempt_round if progress_record else 1
+                is_round_2 = (duration_2 > 0 or attempt_2 is not None or current_round == 2 or done_count_2 > 0)
 
                 weekly_stats.append({
                     "week": i,
-                    "progress": float(progress_value),
+                    "progress": float(prog_1),
+                    "progress_1": float(prog_1),
+                    "progress_2": float(prog_2),
+                    "current_round": current_round,
                     "material_details": material_details,
                     "duration_seconds": duration_1,
                     "correct": attempt_1.correct_answers if attempt_1 else 0,
@@ -868,7 +884,7 @@ class BulkAcademicReportView(APIView):
                     "predicted_2": attempt_2.predicted_score if attempt_2 else 0,
                     "diff_2": attempt_2.score_difference if attempt_2 else 0,
                     "has_quiz": True if (attempt_1 or attempt_2) else False,
-                    "is_round_2_started": True if (duration_2 > 0 or attempt_2) else False
+                    "is_round_2_started": is_round_2
                 })
 
             if student_attempts:

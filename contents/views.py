@@ -65,6 +65,43 @@ def init_vertex_ai():
         print(f"DEBUG: Kimlik Hatası -> {str(e)}")
         raise e
 
+OPENROUTER_API_KEY = "de9227d0a9151854c349c8ea01294bc3c0eb79b805a2a65bf21f4be8c2bbf3a7"
+
+def call_openrouter_ai(prompt_text, temperature=0.7, timeout=12):
+    """OpenRouter API üzerinden google/gemma-2-27b-it modeline istek atar."""
+    api_key = OPENROUTER_API_KEY.strip()
+    auth_header = api_key if api_key.startswith("sk-or-") else f"sk-or-v1-{api_key}"
+    
+    headers = {
+        "Authorization": f"Bearer {auth_header}",
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://bingol.edu.tr",
+        "X-Title": "Bingol University LMS"
+    }
+    
+    payload = {
+        "model": "google/gemma-2-27b-it:free",
+        "models": ["google/gemma-2-27b-it:free", "google/gemma-2-27b-it"],
+        "messages": [
+            {"role": "user", "content": prompt_text}
+        ],
+        "temperature": temperature
+    }
+    
+    response = requests.post(
+        "https://openrouter.ai/api/v1/chat/completions",
+        headers=headers,
+        json=payload,
+        timeout=timeout
+    )
+    
+    if response.status_code == 200:
+        res_json = response.json()
+        if "choices" in res_json and len(res_json["choices"]) > 0:
+            return res_json["choices"][0]["message"]["content"]
+            
+    raise Exception(f"OpenRouter API Hatası ({response.status_code}): {response.text}")
+
 # --- ANA İÇERİK VIEW ---
 
 class WeeklyContentView(APIView):
@@ -440,43 +477,43 @@ class AIChatView(APIView):
     def post(self, request):
         user_message = request.data.get("message")
         week_id = request.data.get("weekly_content_id")
-        if not user_message: return Response({"error": "Mesaj boş."}, status=400)
+        if not user_message:
+            return Response({"error": "Mesaj boş."}, status=400)
+
+        prompt_template = f"""ROL VE MİSYON:
+Sen Bingöl Üniversitesi LMS sisteminde Bilgi Teknolojilerine Giriş dersi için yapılandırılmış 'D2 Kısıtsız YZ Öğrenme Ajanı'sın.
+Tüm bilgi, referans ve içerik çerçeven D2 Kısıtsız Bilgi Tabanı ('D2_Kisitsiz_YZ_Ajani_Bilgi_Tabani.csv') üzerine kuruludur.
+
+KISITSIZ VE DOĞRUDAN ÖĞRENME İLKELERİ:
+1. Doğrudan ve Eksiksiz Yanıt: Öğrencinin sorusuna cevabı ertelemeden, yapay kısıtlama veya basamaklı ipucu zorunluluğu olmaksızın doğrudan, net ve tam bir açıklamayla sun.
+2. Adım Adım Uygulama ve Yöntem: İşlem basamaklarını (menü yolları, kısayollar, ayarlar) sırasıyla, eksiksiz ve doğrudan uygulanabilir biçimde göster.
+3. Kavram Yanılgıları ve Doğrular: D2 Bilgi Tabanında yer alan 'yaygın_hata' verilerini dikkate alarak öğrencinin düşebileceği kavram yanılgısını doğrudan belirt ve doğrusunu açıkça aktar.
+4. Üslup: Anlaşılır, akademik olarak yetkin, nazik, net ve doğrudan sonuca ulaştıran profesyonel bir dil kullan.
+
+Öğrencinin Sorduğu Soru: {user_message}
+
+Lütfen D2 Kısıtsız Bilgi Tabanı verilerine ve doğrudan/açıklayıcı anlatım ilkelerine tam uyumlu bir yanıt ver."""
 
         try:
-            config = init_vertex_ai()
-            url = f"https://{config['location']}-aiplatform.googleapis.com/v1/projects/{config['project_id']}/locations/{config['location']}/publishers/google/models/{config['model_id']}:generateContent"
-            
-            headers = {"Authorization": f"Bearer {config['token']}", "Content-Type": "application/json"}
-            payload = {
-                "contents": [{"role": "user", "parts": [{"text": user_message}]}],
-                "generationConfig": {"maxOutputTokens": 2048, "temperature": 0.7}
-            }
-
-            response = requests.post(url, headers=headers, json=payload, timeout=60)
-            res_json = response.json()
-
-            if 'candidates' in res_json:
-                parts = res_json['candidates'][0]['content']['parts']
-                ai_response_text = "".join([p.get('text', '') for p in parts])
-            else:
-                ai_response_text = "Üzgünüm, şu an yanıt veremiyorum."
-
-            # Kayıt mantığı
-            if week_id:
-                try:
-                    WeeklyContent.objects.filter(id=week_id).exists()
-                    StudentQuestion.objects.create(
-                        student=request.user, 
-                        weekly_content_id=week_id, 
-                        question_text=user_message,
-                        response_text=ai_response_text
-                    )
-                except Exception as ex: 
-                    print(f"DEBUG: Chat Soru Kayıt Hatası -> {str(ex)}")
-                
-            return Response({"response": ai_response_text}, status=200)
+            ai_response_text = call_openrouter_ai(prompt_template, temperature=0.7, timeout=12)
         except Exception as e:
-            return Response({"response": "Sistem yoğunluğu var."}, status=500)
+            print(f"DEBUG: OpenRouter Chat Hatası -> {str(e)}")
+            ai_response_text = "Üzgünüm, şu anda yanıt oluşturulurken bir yoğunluk yaşandı. Lütfen biraz sonra tekrar deneyiniz."
+
+        # Kayıt mantığı
+        if week_id:
+            try:
+                WeeklyContent.objects.filter(id=week_id).exists()
+                StudentQuestion.objects.create(
+                    student=request.user, 
+                    weekly_content_id=week_id, 
+                    question_text=user_message,
+                    response_text=ai_response_text
+                )
+            except Exception as ex: 
+                print(f"DEBUG: Chat Soru Kayıt Hatası -> {str(ex)}")
+            
+        return Response({"response": ai_response_text}, status=200)
 
 # --- QUIZ (SINAV) SİSTEMİ ---
 
@@ -638,52 +675,113 @@ class QuizAIAnalysisView(APIView):
             weekly_content = attempt.quiz.material.parent_content
             progress = StudentProgress.objects.get(student=request.user, weekly_content=weekly_content)
             
-            # --- 2. TUR TETİKLEME MANTIĞI (Aynı kalıyor) ---
+            # --- 2. TUR TETİKLEME MANTIĞI ---
             if attempt.wrong_answers > 0 and progress.current_attempt_round == 1:
                 progress.current_attempt_round = 2
                 progress.completion_percentage = 0  
                 progress.save()
 
-            # 3. VERİTABANINDAN HAZIR ANALİZLERİ TOPLA
-            # Öğrencinin yanlış cevapladığı soruları çekiyoruz
+            # 3. VERİLERİ HAZIRLA
+            ogrenci_tam_ad = f"{request.user.first_name} {request.user.last_name}".strip()
+            if not ogrenci_tam_ad:
+                ogrenci_tam_ad = request.user.username
+
+            bolum = request.user.get_department_display() if hasattr(request.user, 'get_department_display') and request.user.department else (request.user.department or "Belirtilmemiş")
+            hafta_konu = f"{weekly_content.week_number}. Hafta - {weekly_content.title}"
+            
+            total_questions = attempt.quiz.questions.count()
+            dogru = attempt.correct_answers
+            yanlis = attempt.wrong_answers
+            bos = max(0, total_questions - (dogru + yanlis))
+            basari_orani = attempt.score
+
             wrong_answers = StudentAnswer.objects.filter(
                 attempt=attempt, 
                 is_correct=False
-            ).select_related('question')
+            ).select_related('question', 'selected_option')
 
-            combined_analysis = ""
-            user_name = request.user.first_name if request.user.first_name else request.user.username
-            
-            pred = attempt.predicted_score
-            actual = attempt.score
-            diff = attempt.score_difference
-            diff_sign = f"+{diff}" if diff > 0 else f"{diff}"
+            # Eksik kavramlar bloğu ve Soru yönlendirmeleri bloğu
+            eksik_kavramlar_list = []
+            soru_yonlendirmeleri_list = []
 
-            combined_analysis += f"Merhaba {user_name}, bu testteki performansını senin için analiz ettim:\n\n"
-            combined_analysis += f"🎯 Hedef/Tahmin Skorun: %{pred}\n"
-            combined_analysis += f"📊 Gerçekleşen Skorun: %{actual}\n"
-            combined_analysis += f"⚡ Skor Sapması / Fark: {diff_sign} Puan\n\n"
-
-            for ans in wrong_answers:
-                # Soru bazlı hazır açıklamayı (explanation) çekiyoruz
-                q_text = ans.question.question_text
-                # Eğer explanation boşsa bir fallback metni koyuyoruz
-                q_analysis = ans.question.explanation if ans.question.explanation else "Bu konuyla ilgili ders notlarını tekrar gözden geçirmelisin."
+            for idx, ans in enumerate(wrong_answers, start=1):
+                q = ans.question
+                explanation_text = q.explanation.strip() if q.explanation else "Bu konuyla ilgili ders notlarını ve temel kazanımları tekrar gözden geçiriniz."
                 
-                combined_analysis += f"• SORU: {q_text}\n"
-                combined_analysis += f"• ANALİZ: {q_analysis}\n\n"
+                eksik_kavramlar_list.append(f"- Soru {idx} Konusu: {q.question_text[:80]}... (Önemli Not: {explanation_text})")
+                soru_yonlendirmeleri_list.append(
+                    f"Soru {idx}: {q.question_text}\n"
+                    f"Öğrencinin Yanıtı: {ans.selected_option.option_text if ans.selected_option else 'Boş'}\n"
+                    f"D2 Kapsamlı Çözüm ve Doğru Mantık: {explanation_text}"
+                )
 
-            combined_analysis += "\nŞimdi 2. tura geçerek bu eksiklerini tamamlayabilirsin. Başarılar!"
+            if not eksik_kavramlar_list:
+                eksik_kavramlar_blogu = "Tüm sorular doğru yanıtlanmıştır. Eksik kavram veya yanılgı tespit edilmemiştir."
+            else:
+                eksik_kavramlar_blogu = "\n".join(eksik_kavramlar_list)
+
+            if not soru_yonlendirmeleri_list:
+                soru_yonlendirmeleri_blogu = "Yanlış yapılan soru bulunmamaktadır. Harika bir başarı!"
+            else:
+                soru_yonlendirmeleri_blogu = "\n\n".join(soru_yonlendirmeleri_list)
+
+            # System Prompt oluştur
+            quiz_prompt = f"""ROL VE MİSYON:
+Sen üniversite düzeyindeki Bilgi Teknolojilerine Giriş dersi için 'D2 Kısıtsız YZ Öğrenme Ajanı' ilkelerine dayalı, doğrudan, kapsamlı ve çözüm odaklı bir Akademik Ölçme-Değerlendirme Asistanısın.
+Tüm analizlerin, konu açıklamaların ve çözümlerin D2 Kısıtsız Bilgi Tabanı ('D2_Kisitsiz_YZ_Ajani_Bilgi_Tabani.csv') müfredatına, doğrudan bilgi aktarımına ve kazanım hedeflerine tam uyumlu olmalıdır.
+
+DEĞERLENDİRİLECEK VERİLER:
+- Öğrenci: {ogrenci_tam_ad}
+- Bölüm: {bolum}
+- Hafta / Konu: {hafta_konu}
+- Test Skoru: {dogru} Doğru, {yanlis} Yanlış, {bos} Boş (Toplam: {total_questions} Soru | Başarı Oranı: %{basari_orani})
+- Tespit Edilen Eksik Kavramlar ve Yanılgılar (D2 Bilgi Tabanından):
+{eksik_kavramlar_blogu}
+
+- Yanlış Yapılan Sorular ve D2 Kapsamlı Çözümleri:
+{soru_yonlendirmeleri_blogu}
+
+PEDAGOJİK VE BİÇİMSEL KURALLAR:
+1. İLK CÜMLE VE TEBRİK ZORUNLULUĞU:
+Metne MUTLAKA ve İSTİSNASIZ olarak "Merhaba {ogrenci_tam_ad}," hitabıyla başla. Öğrenciyi haftalık değerlendirme testini tamamladığı için samimi ve motive edici bir dille tebrik et.
+
+2. GENEL PERFORMANS VE ANALİZ DEĞERLENDİRMESİ:
+Öğrencinin başarı oranını (%{basari_orani}), güçlü olduğu alanları ve geliştirmesi gereken konuları doğrudan, net ve gerçekçi bir dille özetle.
+
+3. YANLIŞ YAPILAN HER SORUYA ÖZEL 2-3 CÜMLELİK DOĞRUDAN ÇÖZÜM VE AÇIKLAMA:
+Öğrencinin yanlış yaptığı HER BİR soru için (D2 Bilgi Tabanındaki doğru cevap ve yaygın hata verilerine dayanarak) tam 2-3 cümlelik net bir açıklama yap. İpucu vermek yerine; doğru cevabın ne olduğunu, mantığını ve yapılan yaygın hatanın neden yanlış olduğunu doğrudan açıkla.
+
+4. KİLİT KAVRAM ÖZETİ VE KAPANIŞ:
+Analizin sonuna, öğrencinin en çok zorlandığı temel kavramın 1-2 cümlelik doğrudan kilit tanımını/özetini ekle ve bir sonraki haftanın dersi için başarı dileğiyle analizi sonlandır."""
+
+            # OpenRouter Çağrısı (Fallback korumalı)
+            try:
+                ai_text = call_openrouter_ai(quiz_prompt, temperature=0.7, timeout=12)
+            except Exception as ai_err:
+                print(f"DEBUG: OpenRouter Quiz Analiz Hatası -> {str(ai_err)}")
+                # Yerel kural tabanlı fallback
+                ai_text = f"Merhaba {ogrenci_tam_ad},\n\n"
+                ai_text += f"{hafta_konu} değerlendirme testini tamamladığın için tebrik ederim. "
+                ai_text += f"Test sonucunda %{basari_orani} başarı oranı elde ettin ({dogru} Doğru, {yanlis} Yanlış).\n\n"
+                if wrong_answers.exists():
+                    ai_text += "Yanlış yaptığın sorular ve analizleri:\n"
+                    for ans in wrong_answers:
+                        exp = ans.question.explanation or "Bu konuyu ders notlarından tekrar gözden geçiriniz."
+                        ai_text += f"• Soru: {ans.question.question_text}\n• Açıklama: {exp}\n\n"
+                else:
+                    ai_text += "Tüm soruları doğru tamamlayarak harika bir performans gösterdin!\n\n"
+                ai_text += "Bir sonraki haftanın derslerinde ve çalışmalarında başarılar dilerim."
 
             return Response({
-                "ai_feedback": combined_analysis, # İsim aynı kalsın ki frontend kırılmasın
+                "ai_feedback": ai_text,
                 "current_round": progress.current_attempt_round,
                 "score": attempt.score,
                 "predicted_score": attempt.predicted_score,
                 "score_difference": attempt.score_difference
             }, status=200)
-            
-        except Exception as e: 
+
+        except Exception as e:
+            print(f"DEBUG: QuizAIAnalysisView Hatası -> {str(e)}")
             return Response({"error": "Analiz verisi alınamadı."}, status=500)
 
 User = get_user_model()

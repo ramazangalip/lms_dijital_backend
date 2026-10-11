@@ -3,9 +3,9 @@ from django.contrib.auth.models import AbstractUser
 
 class User(AbstractUser):
     DEPARTMENT_CHOICES = [
-        ('siyasetbilimivekamuyonetimi', 'Siyaset Bilimi Ve Kamu Yönetimi'),
-        ('turkdiliveedebiyati', 'Türk Dili Ve Edebiyatı'),
         ('matematik', 'Matematik'),
+        ('siyasetbilimivekamuyonetimi', 'Siyaset Bilimi ve Kamu Yönetimi'),
+        ('turkdiliveedebiyati', 'Türk Dili Ve Edebiyatı'),
     ]
 
     email = models.EmailField(unique=True, verbose_name="E-posta Adresi")

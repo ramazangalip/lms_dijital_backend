@@ -418,7 +418,7 @@ class StudentAnalyticsView(APIView):
 
         dept_param = request.query_params.get('department')
 
-        students = User.objects.filter(is_staff=False, is_teacher=False)
+        students = User.objects.filter(is_staff=False, is_teacher=False, category='d2')
         if dept_param and dept_param != 'all':
             students = students.filter(department=dept_param)
 
@@ -797,7 +797,7 @@ class BulkAcademicReportView(APIView):
 
         # 1. ADIM: İhtiyacımız olan tüm öğrencileri ve ilişkili verileri TEK SEFERDE çek
         students = User.objects.filter(
-            is_staff=False, is_teacher=False, department=department_filter
+            is_staff=False, is_teacher=False, department=department_filter, category='d2'
         ).prefetch_related(
             'timetracking_set', 
             'studentquizattempt_set__quiz__material__parent_content',
@@ -926,9 +926,13 @@ class SystemTimeAnalyticsView(APIView):
     def get(self, request):
         dept = request.query_params.get('department')
         
-        # Ana sorgu kalkanı
-        logs = TimeTracking.objects.all()
-        if dept:
+        # Ana sorgu kalkanı - Sadece D2 kategorisindeki öğrenciler
+        logs = TimeTracking.objects.filter(
+            student__is_staff=False,
+            student__is_teacher=False,
+            student__category='d2'
+        )
+        if dept and dept != 'all':
             logs = logs.filter(student__department=dept)
 
         # 1. Genel Öğrenci Bazında Toplam Süreleri Hesapla
@@ -1069,8 +1073,8 @@ class ChatbotAnalyticsView(APIView):
     def get(self, request):
         dept = request.query_params.get('department')
         
-        # 1. İlgili öğrencileri çek
-        students = User.objects.filter(is_staff=False, is_teacher=False)
+        # 1. İlgili öğrencileri çek (Sadece D2 kategorisi)
+        students = User.objects.filter(is_staff=False, is_teacher=False, category='d2')
         if dept and dept != 'all':
             students = students.filter(department=dept)
         
@@ -1132,7 +1136,7 @@ class DepartmentListView(APIView):
 
     def get(self, request):
         counts = dict(
-            User.objects.filter(is_staff=False, is_teacher=False, department__isnull=False)
+            User.objects.filter(is_staff=False, is_teacher=False, department__isnull=False, category='d2')
             .values('department')
             .annotate(count=Count('id'))
             .values_list('department', 'count')

@@ -32,4 +32,6 @@ urlpatterns = [
     path('system-time-analytics/', SystemTimeAnalyticsView.as_view(), name='system-time-analytics'),
     path('chatbot-analytics/', ChatbotAnalyticsView.as_view(), name='chatbot_analytics'),
     path('departments/', DepartmentListView.as_view(), name='department-list'),
+    path('pre-test/<int:pre_test_id>/submit/', PreTestSubmitView.as_view(), name='pretest-submit'),
+    path('pre-test-analytics/', PreTestAnalyticsView.as_view(), name='pretest-analytics'),
 ]

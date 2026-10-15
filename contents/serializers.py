@@ -44,6 +44,49 @@ class FlashcardSerializer(serializers.ModelSerializer):
         model = Flashcard
         fields = ['id', 'question', 'answer', 'order']
 
+# --- ÖN DEĞERLENDİRME TESTİ SERIALIZERS ---
+
+class PreEvaluationOptionSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(required=False, allow_null=True)
+    class Meta:
+        model = PreEvaluationOption
+        fields = ['id', 'option_text', 'is_correct']
+
+class PreEvaluationOptionStudentSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+    class Meta:
+        model = PreEvaluationOption
+        fields = ['id', 'option_text']
+
+class PreEvaluationQuestionSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(required=False, allow_null=True)
+    options = PreEvaluationOptionSerializer(many=True, required=False)
+    class Meta:
+        model = PreEvaluationQuestion
+        fields = ['id', 'question_text', 'order', 'target_week', 'options']
+
+class PreEvaluationQuestionStudentSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+    options = PreEvaluationOptionStudentSerializer(many=True, read_only=True)
+    class Meta:
+        model = PreEvaluationQuestion
+        # ÖĞRENCİYE HEDEF HAFTA BİLGİSİ ASLA GÖSTERİLMEZ!
+        fields = ['id', 'question_text', 'order', 'options']
+
+class PreEvaluationTestSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+    questions = PreEvaluationQuestionSerializer(many=True, required=False)
+    class Meta:
+        model = PreEvaluationTest
+        fields = ['id', 'title', 'questions']
+
+class PreEvaluationTestStudentSerializer(serializers.ModelSerializer):
+    id = serializers.CharField(read_only=True)
+    questions = PreEvaluationQuestionStudentSerializer(many=True, read_only=True)
+    class Meta:
+        model = PreEvaluationTest
+        fields = ['id', 'title', 'questions']
+
 class WeeklyContentDepartmentScheduleSerializer(serializers.ModelSerializer):
     id = serializers.CharField(required=False, allow_null=True)
     department_name = serializers.SerializerMethodField(read_only=True)
@@ -70,6 +113,13 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
     is_locked = serializers.SerializerMethodField()
     lock_reason = serializers.SerializerMethodField()
     week_number = serializers.IntegerField(validators=[])
+    is_pretest_active = serializers.BooleanField(required=False, default=False)
+    is_pretest_completed = serializers.SerializerMethodField()
+    pre_test = serializers.SerializerMethodField()
+    is_temporarily_unlocked = serializers.SerializerMethodField()
+    temporary_unlock_expires_at = serializers.SerializerMethodField()
+    temporary_unlock_hours_remaining = serializers.SerializerMethodField()
+    remediation_data = serializers.SerializerMethodField()
 
     class Meta:
         model = WeeklyContent
@@ -78,7 +128,10 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
             'intro_title', 'intro_video_url', 'intro_description',
             'release_date', 'deactivation_date', 'department_schedules',
             'is_locked', 'lock_reason',
-            'is_intro_watched', 'materials', 'flashcards', 'progress', 'is_completed', 'current_attempt_round'
+            'is_intro_watched', 'materials', 'flashcards', 'progress', 'is_completed', 'current_attempt_round',
+            'is_pretest_active', 'is_pretest_completed', 'pre_test',
+            'is_temporarily_unlocked', 'temporary_unlock_expires_at', 'temporary_unlock_hours_remaining',
+            'remediation_data'
         ]
 
     def get_department_schedules(self, obj):
@@ -104,7 +157,7 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
     def _get_context_data(self):
         request = self.context.get('request')
         if not request or not request.user.is_authenticated:
-            return None, False, {}, False, {}
+            return None, False, {}, False, {}, {}, set()
 
         is_teacher = getattr(request.user, 'is_teacher', False) or request.user.is_staff
         
@@ -113,19 +166,44 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
                 intro_watched = True
                 progress_by_content = {}
                 progress_by_week = {}
+                temp_unlocks = {}
+                pretest_completed_wc_ids = set()
             else:
                 intro_watched = IntroVideoCompletion.objects.filter(student=request.user, is_watched=True).exists()
                 progresses = list(StudentProgress.objects.filter(student=request.user).select_related('weekly_content'))
                 progress_by_content = {p.weekly_content_id: p for p in progresses}
                 progress_by_week = {p.weekly_content.week_number: p for p in progresses if p.weekly_content}
                 
+                # 2 günlük aktif telafi kilit açmaları
+                active_unlocks = list(TemporaryWeekUnlock.objects.filter(
+                    student=request.user, 
+                    expires_at__gt=timezone.now()
+                ))
+                temp_unlocks = {u.weekly_content_id: u for u in active_unlocks}
+
+                # Tamamlanan ön testler
+                pretest_completed_wc_ids = set(
+                    PreEvaluationAttempt.objects.filter(student=request.user)
+                    .values_list('pre_test__weekly_content_id', flat=True)
+                )
+
             self._cached_user_id = request.user.id
             self._cached_is_teacher = is_teacher
             self._cached_intro_watched = intro_watched
             self._cached_progress_by_content = progress_by_content
             self._cached_progress_by_week = progress_by_week
+            self._cached_temp_unlocks = temp_unlocks
+            self._cached_pretest_completed_wc_ids = pretest_completed_wc_ids
             
-        return request.user, self._cached_is_teacher, self._cached_progress_by_content, self._cached_intro_watched, self._cached_progress_by_week
+        return (
+            request.user, 
+            self._cached_is_teacher, 
+            self._cached_progress_by_content, 
+            self._cached_intro_watched, 
+            self._cached_progress_by_week,
+            self._cached_temp_unlocks,
+            self._cached_pretest_completed_wc_ids
+        )
 
     def _get_effective_dates(self, obj, user):
         """Kullanıcının bölümüne göre geçerli açılış ve pasif etme tarihlerini belirler."""
@@ -153,10 +231,14 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
 
     def get_is_locked(self, obj):
         """Zaman (Bölüm bazlı açılış/kapanış) ve Sıralı İlerleme kontrolü yaparak haftanın kilitli olup olmadığını belirler."""
-        user, is_teacher, progress_by_content, intro_watched, progress_by_week = self._get_context_data()
+        user, is_teacher, progress_by_content, intro_watched, progress_by_week, temp_unlocks, pretest_completed_wc_ids = self._get_context_data()
         if not user:
             return True
         if is_teacher:
+            return False
+
+        # ÖNCELİK 0: Eğer öğrenci bu hafta için 2 günlük aktif bir telafi kilit açmasına sahipse, kilit AÇIKTIR!
+        if obj.id in temp_unlocks:
             return False
 
         now = timezone.now()
@@ -183,32 +265,101 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
         
         return False
 
+    def get_is_temporarily_unlocked(self, obj):
+        user, is_teacher, _, _, _, temp_unlocks, _ = self._get_context_data()
+        if not user or is_teacher:
+            return False
+        return obj.id in temp_unlocks
+
+    def get_temporary_unlock_expires_at(self, obj):
+        user, is_teacher, _, _, _, temp_unlocks, _ = self._get_context_data()
+        if not user or is_teacher:
+            return None
+        tu = temp_unlocks.get(obj.id)
+        return tu.expires_at.isoformat() if tu else None
+
+    def get_temporary_unlock_hours_remaining(self, obj):
+        user, is_teacher, _, _, _, temp_unlocks, _ = self._get_context_data()
+        if not user or is_teacher:
+            return None
+        tu = temp_unlocks.get(obj.id)
+        if not tu:
+            return None
+        diff = (tu.expires_at - timezone.now()).total_seconds()
+        return max(0, int(diff // 3600))
+
+    def get_is_pretest_completed(self, obj):
+        user, is_teacher, _, _, _, _, pretest_completed_wc_ids = self._get_context_data()
+        if not user or is_teacher:
+            return True
+        if not obj.is_pretest_active or obj.week_number < 2:
+            return True
+        return obj.id in pretest_completed_wc_ids
+
+    def get_pre_test(self, obj):
+        user, is_teacher, *_ = self._get_context_data()
+        pre_test_obj = getattr(obj, 'pre_test', None)
+        if not pre_test_obj:
+            try:
+                pre_test_obj = PreEvaluationTest.objects.prefetch_related('questions__options').filter(weekly_content=obj).first()
+            except Exception:
+                pre_test_obj = None
+
+        if not pre_test_obj:
+            return None
+
+        if is_teacher:
+            return PreEvaluationTestSerializer(pre_test_obj).data
+        else:
+            return PreEvaluationTestStudentSerializer(pre_test_obj).data
+
     def get_lock_reason(self, obj):
         """Kilit bildirimi gösterilmez."""
         return None
 
     def get_is_intro_watched(self, obj):
-        user, is_teacher, progress_by_content, intro_watched, progress_by_week = self._get_context_data()
+        user, is_teacher, progress_by_content, intro_watched, progress_by_week, *_ = self._get_context_data()
         if not user:
             return False
         return intro_watched
 
+    def get_remediation_data(self, obj):
+        user, is_teacher, _, _, _, temp_unlocks, _ = self._get_context_data()
+        if not user or is_teacher:
+            return None
+        tu = temp_unlocks.get(obj.id)
+        if not tu:
+            return None
+        return {
+            'is_active': tu.expires_at > timezone.now(),
+            'completion_percentage': tu.completion_percentage,
+            'duration_seconds': tu.total_duration_seconds,
+            'is_completed': tu.is_completed,
+            'expires_at': tu.expires_at.isoformat()
+        }
+
     def get_progress(self, obj):
-        user, is_teacher, progress_by_content, intro_watched, progress_by_week = self._get_context_data()
+        user, is_teacher, progress_by_content, intro_watched, progress_by_week, temp_unlocks, *_ = self._get_context_data()
         if not user:
             return 0.0
+        if not is_teacher and obj.id in temp_unlocks:
+            tu = temp_unlocks[obj.id]
+            return float(tu.completion_percentage)
         prog = progress_by_content.get(obj.id)
         return float(prog.completion_percentage) if prog else 0.0
 
     def get_is_completed(self, obj):
-        user, is_teacher, progress_by_content, intro_watched, progress_by_week = self._get_context_data()
+        user, is_teacher, progress_by_content, intro_watched, progress_by_week, temp_unlocks, *_ = self._get_context_data()
         if not user:
             return False
+        if not is_teacher and obj.id in temp_unlocks:
+            tu = temp_unlocks[obj.id]
+            return tu.is_completed
         prog = progress_by_content.get(obj.id)
         return prog.is_completed if prog else False
 
     def get_current_attempt_round(self, obj):
-        user, is_teacher, progress_by_content, intro_watched, progress_by_week = self._get_context_data()
+        user, is_teacher, progress_by_content, intro_watched, progress_by_week, *_ = self._get_context_data()
         if not user:
             return 1
         prog = progress_by_content.get(obj.id)
@@ -272,11 +423,11 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
 
             mat_obj = None
             if m_id:
-                mat_obj = next((m for m in existing_materials if str(m.id) == str(m_id)), None)
-                if not mat_obj and Material.objects.filter(id=m_id, parent_content=content).exists():
-                    mat_obj = Material.objects.get(id=m_id, parent_content=content)
+                mat_obj = next((m for m in existing_materials if str(m.id) == str(m_id) and m.id not in keep_mat_ids), None)
+                if not mat_obj and Material.objects.filter(id=m_id, parent_content=content).exclude(id__in=keep_mat_ids).exists():
+                    mat_obj = Material.objects.filter(id=m_id, parent_content=content).exclude(id__in=keep_mat_ids).first()
             
-            # Eğer ID gönderilmemişse, aynı haftadaki aynı başlık ve tipe sahip materyali koru
+            # Eğer ID gönderilmemişse veya eşleşmediyse, aynı haftadaki aynı başlık ve tipe sahip materyali koru
             if not mat_obj:
                 mat_obj = next((m for m in existing_materials if m.title == m_item.get('title') and m.content_type == m_item.get('content_type') and m.id not in keep_mat_ids), None)
 
@@ -290,6 +441,9 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
                     mat_obj.duration_seconds = m_item['duration_seconds']
                 mat_obj.save()
             else:
+                # Yeni kayıt oluşturulurken frontend'den gelen veya kopyalanan 'id' kesinlikle silinmeli!
+                # Veritabanının kendi primary key üreticisi (CockroachDB/PG sequence) yeni ID oluşturmalıdır.
+                m_item.pop('id', None)
                 mat_obj = Material.objects.create(parent_content=content, **m_item)
             
             keep_mat_ids.append(mat_obj.id)
@@ -310,6 +464,7 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
                         order=q_idx
                     )
                     for o_val in opts_list:
+                        o_val.pop('id', None)
                         QuizOption.objects.create(question=question_instance, **o_val)
 
         raw_cards = self.initial_data.get('flashcards', [])
@@ -322,7 +477,7 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
 
             card_obj = None
             if c_id:
-                card_obj = next((c for c in existing_cards if str(c.id) == str(c_id)), None)
+                card_obj = next((c for c in existing_cards if str(c.id) == str(c_id) and c.id not in keep_card_ids), None)
 
             if not card_obj:
                 card_obj = next((c for c in existing_cards if c.question == c_item.get('question') and c.id not in keep_card_ids), None)
@@ -343,6 +498,55 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
 
         content.materials.exclude(id__in=keep_mat_ids).delete()
         content.flashcards.exclude(id__in=keep_card_ids).delete()
+
+        # --- ÖN DEĞERLENDİRME TESTİ KAYDI ---
+        if 'is_pretest_active' in self.initial_data:
+            content.is_pretest_active = bool(self.initial_data.get('is_pretest_active', False))
+            content.save(update_fields=['is_pretest_active'])
+
+        pre_test_data = self.initial_data.get('pre_test')
+        if pre_test_data is not None and isinstance(pre_test_data, dict):
+            pre_test_obj, _ = PreEvaluationTest.objects.get_or_create(weekly_content=content)
+            if pre_test_data.get('title'):
+                pre_test_obj.title = pre_test_data['title']
+                pre_test_obj.save()
+
+            questions_data = pre_test_data.get('questions', [])
+            existing_questions = list(pre_test_obj.questions.all())
+            kept_q_ids = []
+
+            for q_idx, q_item in enumerate(questions_data):
+                q_id = q_item.get('id')
+                q_obj = None
+                if q_id:
+                    q_obj = next((q for q in existing_questions if str(q.id) == str(q_id) and q.id not in kept_q_ids), None)
+                if not q_obj:
+                    q_obj = PreEvaluationQuestion(pre_test=pre_test_obj)
+
+                q_obj.question_text = q_item.get('question_text', '')
+                q_obj.order = q_item.get('order', q_idx)
+                q_obj.target_week = int(q_item.get('target_week') or 1)
+                q_obj.save()
+                kept_q_ids.append(q_obj.id)
+
+                opts_data = q_item.get('options', [])
+                existing_opts = list(q_obj.options.all())
+                kept_opt_ids = []
+                for o_idx, o_item in enumerate(opts_data):
+                    o_id = o_item.get('id')
+                    o_obj = None
+                    if o_id:
+                        o_obj = next((o for o in existing_opts if str(o.id) == str(o_id) and o.id not in kept_opt_ids), None)
+                    if not o_obj:
+                        o_obj = PreEvaluationOption(question=q_obj)
+                    o_obj.option_text = o_item.get('option_text', '')
+                    o_obj.is_correct = bool(o_item.get('is_correct', False))
+                    o_obj.save()
+                    kept_opt_ids.append(o_obj.id)
+
+                PreEvaluationOption.objects.filter(question=q_obj).exclude(id__in=kept_opt_ids).delete()
+
+            PreEvaluationQuestion.objects.filter(pre_test=pre_test_obj).exclude(id__in=kept_q_ids).delete()
 
         return content
     
@@ -584,6 +788,11 @@ class BulkWeeklyStatSerializer(serializers.Serializer):
     
     has_quiz = serializers.BooleanField()
     is_round_2_started = serializers.BooleanField()
+    has_remediation = serializers.BooleanField(required=False, default=False)
+    remediation_progress = serializers.FloatField(required=False, default=0.0)
+    remediation_duration = serializers.IntegerField(required=False, default=0)
+    remediation_is_completed = serializers.BooleanField(required=False, default=False)
+    remediation_is_active = serializers.BooleanField(required=False, default=False)
 
 class BulkAcademicReportSerializer(serializers.Serializer):
     """PDF Raporu için tüm öğrenci verisini paketler"""

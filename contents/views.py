@@ -164,7 +164,14 @@ class WeeklyContentView(APIView):
                 )
             
             return Response(serializer.data, status=status.HTTP_201_CREATED)
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        
+        # Detaylı ve anlaşılır hata mesajı oluştur
+        err_list = []
+        for f, err in serializer.errors.items():
+            err_list.append(f"{f}: {err}")
+        detail_text = "; ".join(err_list)
+        print(f"DEBUG: WeeklyContent POST Validation Error for week {request.data.get('week_number')}: {serializer.errors}")
+        return Response({"detail": detail_text, "errors": serializer.errors}, status=status.HTTP_400_BAD_REQUEST)
 
 class CompleteIntroVideoView(APIView):
     """Öğrenci genel tanıtım videosunu bitirdiğinde tüm haftaların kilidi açılır."""
@@ -208,19 +215,49 @@ class TrackActivityView(APIView):
 
         try:
             weekly_content = WeeklyContent.objects.get(id=weekly_content_id)
+
+            # 1. Telafi Kilit Modu Kontrolü:
+            # Eğer bu hafta öğrenci için aktif bir telafi kilidine sahipse,
+            # süre takibi RemediationTimeTracking modelinde TUTULUR ve normal T1/T2 sürelerini ETKİLEMEZ.
+            active_unlock = TemporaryWeekUnlock.objects.filter(
+                student=request.user,
+                weekly_content=weekly_content,
+                expires_at__gt=timezone.now()
+            ).first()
+
+            if active_unlock:
+                rem_tracking, _ = RemediationTimeTracking.objects.get_or_create(
+                    student=request.user,
+                    weekly_content=weekly_content,
+                    material_id=material_id,
+                    temporary_unlock=active_unlock,
+                    date=date.today()
+                )
+                rem_tracking.duration_seconds += seconds
+                rem_tracking.save()
+
+                active_unlock.total_duration_seconds += seconds
+                active_unlock.save(update_fields=['total_duration_seconds'])
+
+                return Response({
+                    "status": "remediation_tracking",
+                    "is_remediation": True,
+                    "material": rem_tracking.material.title if rem_tracking.material else "Genel",
+                    "total_seconds_in_material": rem_tracking.duration_seconds,
+                    "total_remediation_seconds": active_unlock.total_duration_seconds
+                }, status=status.HTTP_200_OK)
+
+            # 2. Normal Zaman Takibi (T1 veya T2)
             progress, _ = StudentProgress.objects.get_or_create(
                 student=request.user, 
                 weekly_content=weekly_content
             )
             current_round = progress.current_attempt_round
 
-            # KRİTİK DEĞİŞİKLİK: 
-            # get_or_create içine 'material' alanını ekliyoruz.
-            # Böylece her materyal için ayrı bir satır oluşur.
             tracking, _ = TimeTracking.objects.get_or_create(
                 student=request.user,
                 weekly_content=weekly_content,
-                material_id=material_id, # Materyal bazlı satır
+                material_id=material_id,
                 attempt_round=current_round,
                 date=date.today()
             )
@@ -262,6 +299,68 @@ class CompleteMaterialView(APIView):
                 return Response({"error": "Materyal bulunamadı"}, status=status.HTTP_404_NOT_FOUND)
 
         weekly_content = material.parent_content
+
+        # 1.5. Ön Değerlendirme Testi Zorunluluğu Kontrolü (Hafta >= 2 ve aktifse)
+        if weekly_content.is_pretest_active and weekly_content.week_number >= 2:
+            has_pretest_done = PreEvaluationAttempt.objects.filter(
+                student=request.user,
+                pre_test__weekly_content=weekly_content
+            ).exists()
+            if not has_pretest_done:
+                return Response({
+                    "error": "Bu haftanın materyallerine erişebilmek için lütfen önce Ön Değerlendirme Testini tamamlayınız."
+                }, status=status.HTTP_403_FORBIDDEN)
+
+        # 1.6. Telafi Kilit Modu Kontrolü:
+        # Eğer bu hafta öğrenci için telafi amaçlı açılmışsa:
+        # Materyal tamamlamaları ve yüzdelik AYRI BİR YERDE (RemediationCompletedMaterial & TemporaryWeekUnlock) tutulur.
+        # Normal 1. ve 2. tur ilerlemelerini ve puanlarını ASLA etkilemez.
+        # Ayrıca haftalık değerlendirme testi (form) telafi sürecinde kesinlikle çözülemez!
+        active_unlock = TemporaryWeekUnlock.objects.filter(
+            student=request.user,
+            weekly_content=weekly_content,
+            expires_at__gt=timezone.now()
+        ).first()
+
+        if active_unlock:
+            if material.content_type == 'form':
+                return Response({
+                    "error": "Bu hafta ön test telafisi kapsamında açılmıştır. Haftalık değerlendirme testi çözülemez."
+                }, status=status.HTTP_400_BAD_REQUEST)
+
+            # Telafi kapsamında materyali ayrı modelde kaydet
+            RemediationCompletedMaterial.objects.get_or_create(
+                student=request.user,
+                material=material,
+                temporary_unlock=active_unlock
+            )
+
+            # Telafi yüzdeliğini hesapla (Ders materyalleri üzerinden)
+            study_mats_count = weekly_content.materials.exclude(content_type='form').count()
+            if study_mats_count == 0:
+                study_mats_count = weekly_content.materials.count()
+
+            done_study_count = RemediationCompletedMaterial.objects.filter(
+                student=request.user,
+                temporary_unlock=active_unlock,
+                material__parent_content=weekly_content
+            ).count()
+
+            rem_perc = min(100.0, round((done_study_count / study_mats_count) * 100, 2)) if study_mats_count > 0 else 100.0
+            active_unlock.completion_percentage = rem_perc
+            if rem_perc >= 100:
+                active_unlock.is_completed = True
+            active_unlock.save()
+
+            return Response({
+                "status": "success",
+                "is_remediation": True,
+                "round": "remediation",
+                "current_percentage": active_unlock.completion_percentage,
+                "material_id": str(material.id),
+                "new_points_earned": 0,
+                "total_points": request.user.total_points
+            }, status=status.HTTP_200_OK)
 
         # 2. Öğrencinin aktif deneme turunu (Round) tespit et
         progress, _ = StudentProgress.objects.get_or_create(
@@ -340,16 +439,29 @@ class CompletedMaterialIdsView(APIView):
                 attempt_round=prog.current_attempt_round
             )
         
-        if not query:
-            return Response([])
+        completed_set = set()
 
         # 3. Sadece aktif tura ait olan tamamlanmış materyal ID'lerini çek
-        completed_ids = CompletedMaterial.objects.filter(
-            query,
-            student=request.user
-        ).values_list('material_id', flat=True)
+        if query:
+            normal_ids = CompletedMaterial.objects.filter(
+                query,
+                student=request.user
+            ).values_list('material_id', flat=True)
+            completed_set.update(str(m_id) for m_id in normal_ids)
+
+        # 4. Aktif telafi kilitleri kapsamındaki tamamlanan materyalleri de ekle
+        active_unlocks = TemporaryWeekUnlock.objects.filter(
+            student=request.user,
+            expires_at__gt=timezone.now()
+        )
+        if active_unlocks.exists():
+            rem_ids = RemediationCompletedMaterial.objects.filter(
+                student=request.user,
+                temporary_unlock__in=active_unlocks
+            ).values_list('material_id', flat=True)
+            completed_set.update(str(m_id) for m_id in rem_ids)
         
-        return Response([str(m_id) for m_id in completed_ids])
+        return Response(list(completed_set))
 
 class StudentProgressListView(APIView):
     permission_classes = [IsAuthenticated]
@@ -525,6 +637,29 @@ class QuizSubmitView(APIView):
         # 1. Temel nesneleri al
         quiz = get_object_or_404(Quiz, id=str(quiz_id))
         weekly_content = quiz.material.parent_content
+
+        # 1.1. Ön Değerlendirme Testi Zorunluluğu Kontrolü
+        if weekly_content.is_pretest_active and weekly_content.week_number >= 2:
+            has_pretest_done = PreEvaluationAttempt.objects.filter(
+                student=request.user,
+                pre_test__weekly_content=weekly_content
+            ).exists()
+            if not has_pretest_done:
+                return Response({
+                    "error": "Ön değerlendirme testini tamamlamadan haftalık değerlendirme testini çözemezsiniz."
+                }, status=status.HTTP_403_FORBIDDEN)
+
+        # 1.2. Telafi Kilit Modu Kontrolü:
+        is_remediation_unlock = TemporaryWeekUnlock.objects.filter(
+            student=request.user,
+            weekly_content=weekly_content,
+            expires_at__gt=timezone.now()
+        ).exists()
+
+        if is_remediation_unlock:
+            return Response({
+                "error": "Bu hafta ön test telafisi kapsamında 2 günlüğüne sadece inceleme amacıyla açılmıştır. Haftalık test çözülemez ve puan kaydedilmez."
+            }, status=status.HTTP_400_BAD_REQUEST)
         
         # 2. Mevcut tur (round) bilgisini al
         progress, _ = StudentProgress.objects.get_or_create(
@@ -1159,4 +1294,335 @@ class DepartmentListView(APIView):
                     "student_count": count
                 })
                 
-        return Response(result, status=200)
+        return Response(result, status=200)
+
+
+# ==============================================================================
+# ÖN DEĞERLENDİRME TESTİ VE ANALİTİKLERİ (2. HAFTADAN İTİBAREN)
+# ==============================================================================
+
+class PreTestSubmitView(APIView):
+    """
+    Öğrencinin haftalık ön değerlendirme testini (5 şıklı çoktan seçmeli) gönderdiği endpoint.
+    Yanlış yapılan soruların hedeflediği önceki haftanın kilidi 2 GÜNLÜĞÜNE telafi amacıyla açılır.
+    """
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, pre_test_id):
+        pre_test = get_object_or_404(PreEvaluationTest, id=pre_test_id)
+        weekly_content = pre_test.weekly_content
+
+        answers_data = request.data.get('answers', [])
+        if not answers_data:
+            return Response({"error": "Cevaplar boş olamaz."}, status=status.HTTP_400_BAD_REQUEST)
+
+        questions = list(pre_test.questions.prefetch_related('options').all())
+        if not questions:
+            return Response({"error": "Bu testte soru bulunmamaktadır."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Mükerrer gönderim kontrolü (Ön test bir kez tamamlanır)
+        existing_attempt = PreEvaluationAttempt.objects.filter(student=request.user, pre_test=pre_test).first()
+        if existing_attempt:
+            return Response({
+                "status": "already_completed",
+                "message": "Bu haftanın ön değerlendirme testini zaten tamamladınız.",
+                "score": existing_attempt.score,
+                "correct_answers": existing_attempt.correct_answers,
+                "wrong_answers": existing_attempt.wrong_answers,
+                "unlocked_weeks": []
+            }, status=status.HTTP_200_OK)
+
+        # Gelen cevapları eşle: question_id -> option_id (selected_option_id desteği ile)
+        ans_map = {}
+        for item in answers_data:
+            q_id = item.get('question_id') or item.get('question')
+            opt_id = item.get('option_id') or item.get('selected_option_id') or item.get('selected_option')
+            if q_id is not None and opt_id is not None:
+                ans_map[str(q_id)] = str(opt_id)
+
+        correct_count = 0
+        wrong_count = 0
+        wrong_questions = []
+
+        attempt = PreEvaluationAttempt.objects.create(
+            student=request.user,
+            pre_test=pre_test,
+            score=0,
+            correct_answers=0,
+            wrong_answers=0
+        )
+
+        for q in questions:
+            selected_opt_id = ans_map.get(str(q.id))
+            selected_opt = None
+            is_corr = False
+
+            if selected_opt_id:
+                for opt in q.options.all():
+                    if str(opt.id) == str(selected_opt_id):
+                        selected_opt = opt
+                        is_corr = bool(opt.is_correct)
+                        break
+
+            if is_corr:
+                correct_count += 1
+            else:
+                wrong_count += 1
+                wrong_questions.append(q)
+
+            PreEvaluationAnswer.objects.create(
+                attempt=attempt,
+                question=q,
+                selected_option=selected_opt,
+                is_correct=is_corr
+            )
+
+        total_q = len(questions)
+        attempt.score = round((correct_count / total_q) * 100) if total_q > 0 else 0
+        attempt.correct_answers = correct_count
+        attempt.wrong_answers = wrong_count
+        attempt.save()
+
+        # Telafi kilidi açma: Yanlış yapılan soruların hedef haftalarını 2 GÜNLÜĞÜNE aç
+        unlocked_week_numbers = []
+        if wrong_questions:
+            now = timezone.now()
+            expires = now + timedelta(days=2)
+            for wq in wrong_questions:
+                t_week = wq.target_week
+                # Sadece önceki haftalar için telafi uygulanır
+                if t_week and 1 <= t_week < weekly_content.week_number:
+                    target_wc = WeeklyContent.objects.filter(week_number=t_week).first()
+                    if target_wc:
+                        TemporaryWeekUnlock.objects.update_or_create(
+                            student=request.user,
+                            weekly_content=target_wc,
+                            defaults={
+                                'expires_at': expires,
+                                'source_pre_test': pre_test
+                            }
+                        )
+                        if t_week not in unlocked_week_numbers:
+                            unlocked_week_numbers.append(t_week)
+        else:
+            # Hatalı soru yoksa bu teste ait kilit açma varsa temizle
+            TemporaryWeekUnlock.objects.filter(
+                student=request.user,
+                source_pre_test=pre_test
+            ).delete()
+
+        unlocked_week_numbers.sort()
+
+        return Response({
+            "status": "success",
+            "score": attempt.score,
+            "correct_answers": correct_count,
+            "wrong_answers": wrong_count,
+            "unlocked_weeks": unlocked_week_numbers
+        }, status=status.HTTP_201_CREATED)
+
+
+class PreTestAnalyticsView(APIView):
+    """
+    Akademisyen Paneli için Ön Değerlendirme Testi Analitikleri.
+    SADECE 'd2' kategorisindeki öğrencileri bölüm bölüm listeler.
+    Web paneli ve PDF raporu için tam döküm sağlar.
+    """
+    permission_classes = [IsAdminUser]
+
+    def get(self, request):
+        from collections import defaultdict
+        dept_param = request.query_params.get('department')
+        week_param = request.query_params.get('week_number')
+
+        # KURAL: Yalnızca D2 kategorisindeki öğrenciler listelenecek
+        students = User.objects.filter(
+            is_staff=False, 
+            is_teacher=False, 
+            category='d2'
+        )
+        if dept_param and dept_param != 'all':
+            students = students.filter(department=dept_param)
+
+        students = students.order_by('first_name', 'last_name')
+
+        # 2. haftadan itibaren olan haftaları al
+        weeks_qs = WeeklyContent.objects.filter(week_number__gte=2)
+        if week_param and week_param != 'all':
+            try:
+                weeks_qs = weeks_qs.filter(week_number=int(week_param))
+            except ValueError:
+                pass
+        weeks = list(weeks_qs.order_by('week_number'))
+        week_ids = [w.id for w in weeks]
+
+        # Bu haftalara ait ön testleri al
+        pre_tests = list(PreEvaluationTest.objects.filter(weekly_content_id__in=week_ids).select_related('weekly_content'))
+        pre_test_by_wc = {pt.weekly_content_id: pt for pt in pre_tests}
+        pre_test_ids = [pt.id for pt in pre_tests]
+
+        student_ids = [s.id for s in students]
+        attempts = list(PreEvaluationAttempt.objects.filter(
+            student_id__in=student_ids,
+            pre_test_id__in=pre_test_ids
+        ).select_related('pre_test__weekly_content', 'student'))
+
+        attempt_by_student_and_wc = {}
+        for att in attempts:
+            attempt_by_student_and_wc[(att.student_id, att.pre_test.weekly_content_id)] = att
+
+        # Öğrencilerin yanlış cevap detaylarını çek
+        attempt_ids = [att.id for att in attempts]
+        answers = list(PreEvaluationAnswer.objects.filter(
+            attempt_id__in=attempt_ids
+        ).select_related('question', 'selected_option', 'attempt'))
+
+        answers_by_attempt = defaultdict(list)
+        for ans in answers:
+            answers_by_attempt[ans.attempt_id].append(ans)
+
+        # Aktif ve tamamlanan telafi kilitlerini çek
+        temp_unlocks = list(TemporaryWeekUnlock.objects.filter(
+            student_id__in=student_ids
+        ).select_related('weekly_content'))
+        
+        # Tamamlanan telafi materyallerini çek
+        rem_completed_records = list(RemediationCompletedMaterial.objects.filter(
+            student_id__in=student_ids
+        ).select_related('material'))
+        rem_completed_map = {}
+        for rcr in rem_completed_records:
+            if rcr.temporary_unlock_id and rcr.material_id:
+                rem_completed_map[(rcr.temporary_unlock_id, rcr.material_id)] = rcr
+
+        # Telafi zaman kayıtlarını çek (Materyal bazında harcanan süreler)
+        rem_time_records = list(RemediationTimeTracking.objects.filter(
+            student_id__in=student_ids
+        ).select_related('material'))
+        rem_times_by_unlock_mat = defaultdict(int)
+        for rtr in rem_time_records:
+            if rtr.temporary_unlock_id and rtr.material_id:
+                rem_times_by_unlock_mat[(rtr.temporary_unlock_id, rtr.material_id)] += rtr.duration_seconds
+
+        # Açılan haftaların tüm ders materyallerini çek (form hariç)
+        unlocked_wc_ids = list(set(tu.weekly_content_id for tu in temp_unlocks))
+        wc_materials = list(Material.objects.filter(
+            parent_content_id__in=unlocked_wc_ids
+        ).exclude(content_type='form').order_by('id'))
+        
+        mats_by_wc = defaultdict(list)
+        for m in wc_materials:
+            mats_by_wc[m.parent_content_id].append(m)
+
+        now = timezone.now()
+        unlocks_by_student = defaultdict(list)
+        for tu in temp_unlocks:
+            is_active = tu.expires_at > now
+            hours_left = max(0, int((tu.expires_at - now).total_seconds() // 3600)) if is_active else 0
+            
+            materials_list = []
+            for mat in mats_by_wc.get(tu.weekly_content_id, []):
+                dur_sec = rem_times_by_unlock_mat.get((tu.id, mat.id), 0)
+                comp_rec = rem_completed_map.get((tu.id, mat.id))
+                materials_list.append({
+                    "id": str(mat.id),
+                    "title": mat.title,
+                    "content_type": mat.content_type,
+                    "duration_seconds": dur_sec,
+                    "duration_minutes": round(dur_sec / 60, 1),
+                    "is_completed": bool(comp_rec),
+                    "completed_at": comp_rec.completed_at.strftime("%d.%m.%Y %H:%M") if comp_rec else None
+                })
+
+            unlocks_by_student[tu.student_id].append({
+                "id": str(tu.id),
+                "week_number": tu.weekly_content.week_number,
+                "week_title": tu.weekly_content.title,
+                "unlocked_at": tu.unlocked_at.strftime("%d.%m.%Y %H:%M") if tu.unlocked_at else None,
+                "expires_at": tu.expires_at.strftime("%d.%m.%Y %H:%M"),
+                "hours_remaining": hours_left,
+                "is_active": is_active,
+                "completion_percentage": round(tu.completion_percentage, 1),
+                "total_duration_seconds": tu.total_duration_seconds,
+                "duration_minutes": round(tu.total_duration_seconds / 60, 1),
+                "is_completed": tu.is_completed,
+                "completed_count": len([m for m in materials_list if m['is_completed']]),
+                "total_materials_count": len(materials_list),
+                "materials_breakdown": materials_list,
+                "completed_materials": [m['title'] for m in materials_list if m['is_completed']]
+            })
+
+        # Öğrenci bazında döküm oluştur
+        report_students = []
+        total_score_sum = 0
+        total_attempts_count = 0
+        remediation_counts = defaultdict(int)
+
+        for s in students:
+            student_week_data = []
+            for w in weeks:
+                pt = pre_test_by_wc.get(w.id)
+                att = attempt_by_student_and_wc.get((s.id, w.id))
+                
+                wrong_details = []
+                unlocked_by_att = set()
+                if att:
+                    total_score_sum += att.score
+                    total_attempts_count += 1
+                    
+                    att_answers = answers_by_attempt.get(att.id, [])
+                    for a in att_answers:
+                        if not a.is_correct:
+                            unlocked_by_att.add(a.question.target_week)
+                            remediation_counts[a.question.target_week] += 1
+                            wrong_details.append({
+                                "question_text": a.question.question_text[:80],
+                                "target_week": a.question.target_week,
+                                "selected_option": a.selected_option.option_text if a.selected_option else "Boş",
+                            })
+
+                student_week_data.append({
+                    "week_number": w.week_number,
+                    "week_title": w.title,
+                    "is_pretest_active": w.is_pretest_active,
+                    "has_attempt": bool(att),
+                    "score": att.score if att else None,
+                    "correct": att.correct_answers if att else None,
+                    "wrong": att.wrong_answers if att else None,
+                    "completed_at": att.completed_at.strftime("%d.%m.%Y %H:%M") if att else None,
+                    "unlocked_weeks": sorted(list(unlocked_by_att)),
+                    "wrong_questions": wrong_details
+                })
+
+            student_unlocks = unlocks_by_student.get(s.id, [])
+            active_unlocks = [u for u in student_unlocks if u.get('is_active')]
+
+            report_students.append({
+                "id": str(s.id),
+                "full_name": s.get_full_name() or s.username,
+                "email": s.email,
+                "department": s.department,
+                "department_name": s.get_department_display() if s.department else "-",
+                "active_remediations": active_unlocks,
+                "all_remediations": student_unlocks,
+                "weekly_results": student_week_data
+            })
+
+        avg_score = round(total_score_sum / total_attempts_count, 1) if total_attempts_count > 0 else 0
+        total_remediations = len(temp_unlocks)
+        active_remediations_count = len([tu for tu in temp_unlocks if tu.expires_at > now])
+        completed_remediations_count = len([tu for tu in temp_unlocks if tu.is_completed or tu.completion_percentage >= 100])
+        avg_rem_progress = round(sum(tu.completion_percentage for tu in temp_unlocks) / total_remediations, 1) if total_remediations > 0 else 0
+
+        return Response({
+            "total_students": len(students),
+            "total_attempts": total_attempts_count,
+            "average_score": avg_score,
+            "remediation_summary": dict(remediation_counts),
+            "total_remediations": total_remediations,
+            "active_remediations_count": active_remediations_count,
+            "completed_remediations_count": completed_remediations_count,
+            "avg_remediation_progress": avg_rem_progress,
+            "students": report_students
+        }, status=200)
+

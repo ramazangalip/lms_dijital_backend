@@ -25,6 +25,11 @@ class WeeklyContent(models.Model):
     intro_title = models.CharField(max_length=255, default="Genel Tanıtım", verbose_name="Tanıtım Başlığı")
     intro_video_url = models.URLField(blank=True, null=True, verbose_name="Tanıtım Videosu (Embed Link)")
     intro_description = models.TextField(blank=True, null=True, verbose_name="Tanıtım Metni/Açıklaması")
+    is_pretest_active = models.BooleanField(
+        default=False, 
+        verbose_name="Ön Değerlendirme Testi Aktif mi?",
+        help_text="2. haftadan itibaren aktif edildiğinde, öğrenci bu testi tamamlamadan haftalık materyallere erişemez."
+    )
 
     class Meta:
         verbose_name = "Haftalık İçerik"
@@ -262,7 +267,7 @@ class QuizQuestion(models.Model):
 class QuizOption(models.Model):
     """Soruların şıkları (A, B, C, D...)"""
     question = models.ForeignKey(QuizQuestion, on_delete=models.CASCADE, related_name='options')
-    option_text = models.CharField(max_length=255)
+    option_text = models.TextField(verbose_name="Şık Metni")
     is_correct = models.BooleanField(default=False)
 
     class Meta:
@@ -344,3 +349,196 @@ class Flashcard(models.Model):
 
     def __str__(self):
         return f"{self.weekly_content.week_number}. Hafta - {self.question}"
+
+
+# ==============================================================================
+# HAFTALIK ÖN DEĞERLENDİRME TESTİ MODELLERİ (2. HAFTADAN İTİBAREN)
+# ==============================================================================
+
+class PreEvaluationTest(models.Model):
+    """
+    Her hafta için isteğe bağlı (varsayılan kapalı) Ön Değerlendirme Testi.
+    2. haftadan itibaren aktif edilebilir.
+    """
+    weekly_content = models.OneToOneField(
+        WeeklyContent, 
+        on_delete=models.CASCADE, 
+        related_name='pre_test',
+        verbose_name="Haftalık İçerik"
+    )
+    title = models.CharField(max_length=255, default="Haftalık Ön Değerlendirme Testi", verbose_name="Ön Test Başlığı")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Ön Değerlendirme Testi"
+        verbose_name_plural = "Ön Değerlendirme Testleri"
+
+    def __str__(self):
+        return f"Ön Test: Hafta {self.weekly_content.week_number} - {self.title}"
+
+
+class PreEvaluationQuestion(models.Model):
+    """
+    Ön değerlendirme testi sorusu.
+    Her soru 5 şıklıdır ve yanlış yapıldığında hangi önceki haftanın kilidinin 
+    2 günlüğüne telafi amaçlı açılacağını belirleyen 'target_week' bilgisine sahiptir.
+    Önemli: target_week bilgisi öğrenciye asla gösterilmez.
+    """
+    pre_test = models.ForeignKey(PreEvaluationTest, on_delete=models.CASCADE, related_name='questions')
+    question_text = models.TextField(verbose_name="Soru Metni")
+    order = models.PositiveIntegerField(default=0, verbose_name="Soru Sırası")
+    target_week = models.IntegerField(
+        default=1, 
+        verbose_name="Yanlış Yapıldığında Kilidi Açılacak Hafta",
+        help_text="Öğrenci bu soruyu yanlış yaparsa kilidi 2 günlüğüne açılacak olan önceki hafta numarası"
+    )
+
+    class Meta:
+        ordering = ['order']
+        verbose_name = "Ön Test Sorusu"
+        verbose_name_plural = "Ön Test Soruları"
+        indexes = [
+            models.Index(fields=['pre_test', 'order']),
+        ]
+
+    def __str__(self):
+        return f"Soru {self.order + 1} (Hedef: Hafta {self.target_week}): {self.question_text[:50]}"
+
+
+class PreEvaluationOption(models.Model):
+    """
+    Soruların 5 şıkkı (A, B, C, D, E).
+    """
+    question = models.ForeignKey(PreEvaluationQuestion, on_delete=models.CASCADE, related_name='options')
+    option_text = models.TextField(verbose_name="Şık Metni")
+    is_correct = models.BooleanField(default=False, verbose_name="Doğru Şık mı?")
+
+    class Meta:
+        verbose_name = "Ön Test Şıkkı"
+        verbose_name_plural = "Ön Test Şıkları"
+        indexes = [
+            models.Index(fields=['question', 'is_correct']),
+        ]
+
+    def __str__(self):
+        return f"{self.option_text} ({'Doğru' if self.is_correct else 'Yanlış'})"
+
+
+class PreEvaluationAttempt(models.Model):
+    """
+    Öğrencinin haftalık ön değerlendirme testi çözme denemesi ve skoru.
+    """
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='pre_evaluation_attempts')
+    pre_test = models.ForeignKey(PreEvaluationTest, on_delete=models.CASCADE, related_name='attempts')
+    score = models.IntegerField(default=0, verbose_name="Skor (%)")
+    correct_answers = models.IntegerField(default=0, verbose_name="Doğru Sayısı")
+    wrong_answers = models.IntegerField(default=0, verbose_name="Yanlış Sayısı")
+    completed_at = models.DateTimeField(auto_now_add=True, verbose_name="Tamamlanma Tarihi")
+
+    class Meta:
+        verbose_name = "Ön Test Denemesi"
+        verbose_name_plural = "Ön Test Denemeleri"
+        indexes = [
+            models.Index(fields=['student', 'pre_test']),
+            models.Index(fields=['completed_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.student.get_full_name()} - Hafta {self.pre_test.weekly_content.week_number} Ön Test (%{self.score})"
+
+
+class PreEvaluationAnswer(models.Model):
+    """
+    Öğrencinin ön testteki her bir soruya verdiği yanıt.
+    """
+    attempt = models.ForeignKey(PreEvaluationAttempt, on_delete=models.CASCADE, related_name='answers')
+    question = models.ForeignKey(PreEvaluationQuestion, on_delete=models.CASCADE)
+    selected_option = models.ForeignKey(PreEvaluationOption, on_delete=models.CASCADE, null=True, blank=True)
+    is_correct = models.BooleanField(default=False)
+
+    class Meta:
+        verbose_name = "Ön Test Öğrenci Cevabı"
+        verbose_name_plural = "Ön Test Öğrenci Cevapları"
+        indexes = [
+            models.Index(fields=['attempt', 'is_correct']),
+        ]
+
+
+class TemporaryWeekUnlock(models.Model):
+    """
+    Ön değerlendirme testinde yanlış yapılan sorular sonucu,
+    ilgili önceki haftanın öğrenci için 2 GÜNLÜĞÜNE telafi ve inceleme amaçlı açılması.
+    
+    ÖNEMLİ KURAL:
+    Bu geçici açılış süresince o haftanın hiçbir ilerleme yüzdesi, materyal tamamlaması,
+    test sonucu DB'de sıfırlanmaz veya yeni puan/tamamlama kaydedilmez (Salt-okunur / İnceleme modu).
+    """
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='temporary_week_unlocks')
+    weekly_content = models.ForeignKey(WeeklyContent, on_delete=models.CASCADE, related_name='temporary_unlocks')
+    unlocked_at = models.DateTimeField(auto_now_add=True, verbose_name="Kilit Açılma Tarihi")
+    expires_at = models.DateTimeField(verbose_name="Geçerlilik Bitiş Tarihi (2 Gün)")
+    source_pre_test = models.ForeignKey(PreEvaluationTest, on_delete=models.SET_NULL, null=True, blank=True, verbose_name="Kaynak Ön Test")
+    
+    # TELAFİ SÜRECİNE ÖZEL İLERLEME VE SÜRE TAKİBİ (Normal T1/T2 ve 1/2. tur verilerini ASLA etkilemez)
+    completion_percentage = models.FloatField(default=0.0, verbose_name="Telafi Tamamlama Yüzdesi")
+    total_duration_seconds = models.PositiveIntegerField(default=0, verbose_name="Telafi Toplam Süre (sn)")
+    is_completed = models.BooleanField(default=False, verbose_name="Telafi Tamamlandı mı?")
+
+    class Meta:
+        verbose_name = "Geçici Hafta Telafi Kilidi Açma"
+        verbose_name_plural = "Geçici Hafta Telafi Kilit Açmaları"
+        indexes = [
+            models.Index(fields=['student', 'weekly_content']),
+            models.Index(fields=['expires_at']),
+        ]
+
+    def __str__(self):
+        return f"{self.student.email} - Hafta {self.weekly_content.week_number} Geçici Açık (Bitiş: {self.expires_at})"
+
+
+class RemediationCompletedMaterial(models.Model):
+    """
+    Telafi kilidi aktif iken öğrencinin tamamladığı materyalleri ayrı tutan model.
+    Normal CompletedMaterial (1. ve 2. Tur) kayıtlarını ASLA etkilemez.
+    """
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='remediation_completed_materials')
+    material = models.ForeignKey(Material, on_delete=models.CASCADE, related_name='remediation_completions')
+    temporary_unlock = models.ForeignKey(TemporaryWeekUnlock, on_delete=models.CASCADE, related_name='completed_records', null=True, blank=True)
+    completed_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('student', 'material', 'temporary_unlock')
+        verbose_name = "Telafi Tamamlanan Materyal"
+        verbose_name_plural = "Telafi Tamamlanan Materyaller"
+        indexes = [
+            models.Index(fields=['student', 'material']),
+            models.Index(fields=['temporary_unlock']),
+        ]
+
+    def __str__(self):
+        return f"{self.student.email} - Telafi: {self.material.title}"
+
+
+class RemediationTimeTracking(models.Model):
+    """
+    Telafi kilidi aktif iken materyallerde geçirilen süreleri ayrı tutan model.
+    Normal TimeTracking (T1 ve T2 süreleri) tablosunu ASLA kirletmez veya etkilemez.
+    """
+    student = models.ForeignKey(User, on_delete=models.CASCADE, related_name='remediation_time_trackings')
+    weekly_content = models.ForeignKey(WeeklyContent, on_delete=models.CASCADE, related_name='remediation_trackings')
+    material = models.ForeignKey(Material, on_delete=models.CASCADE, null=True, blank=True, related_name='remediation_time_records')
+    temporary_unlock = models.ForeignKey(TemporaryWeekUnlock, on_delete=models.CASCADE, related_name='time_records', null=True, blank=True)
+    duration_seconds = models.PositiveIntegerField(default=0)
+    date = models.DateField(auto_now_add=True)
+
+    class Meta:
+        verbose_name = "Telafi Zaman Takibi"
+        verbose_name_plural = "Telafi Zaman Takip Kayıtları"
+        indexes = [
+            models.Index(fields=['student', 'weekly_content']),
+            models.Index(fields=['temporary_unlock']),
+            models.Index(fields=['student', 'date']),
+        ]
+
+    def __str__(self):
+        return f"{self.student.email} - Telafi {self.duration_seconds}s"

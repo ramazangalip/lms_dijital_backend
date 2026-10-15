@@ -192,3 +192,32 @@ class CompletedMaterialAdmin(admin.ModelAdmin):
         return obj.material.title
     get_material_name.short_description = 'Tamamlanan İçerik'
 admin.site.register(Flashcard)
+
+
+@admin.register(AcademicReportEmailLog)
+class AcademicReportEmailLogAdmin(admin.ModelAdmin):
+    list_display = (
+        'department', 'week_number', 'trigger_type', 
+        'trigger_date', 'recipient_email', 'sent_at', 'status'
+    )
+    list_filter = ('department', 'week_number', 'status', 'trigger_type', 'sent_at')
+    search_fields = ('recipient_email', 'recipient_name', 'department', 'pdf_filename')
+    readonly_fields = ('sent_at',)
+    ordering = ('-sent_at',)
+    actions = ['resend_selected_reports']
+
+    @admin.action(description="Seçili raporları tekrar üret ve akademisyene mail at")
+    def resend_selected_reports(self, request, queryset):
+        from contents.services.academic_report_service import send_academic_report
+        success_count = 0
+        for log_entry in queryset:
+            res = send_academic_report(
+                department=log_entry.department,
+                week_number=log_entry.week_number,
+                trigger_type='MANUAL',
+                trigger_date=log_entry.trigger_date,
+                force=True
+            )
+            if res.get('sent_count', 0) > 0:
+                success_count += 1
+        self.message_user(request, f"{success_count} adet rapor başarıyla yeniden gönderildi.")

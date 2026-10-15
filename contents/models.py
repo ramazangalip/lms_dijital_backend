@@ -541,4 +541,59 @@ class RemediationTimeTracking(models.Model):
         ]
 
     def __str__(self):
-        return f"{self.student.email} - Telafi {self.duration_seconds}s"
+        return f"{self.student.email} - Telafi {self.duration_seconds}s"
+
+
+class AcademicReportEmailLog(models.Model):
+    """
+    Bölüm bazlı haftalık D2 öğrenci analitiği raporlarının akademisyenlere
+    gönderim kayıtlarını tutan ve mükerrer gönderimleri engelleyen model.
+    """
+    TRIGGER_CHOICES = [
+        ('NEXT_WEEK_MINUS_ONE_DAY', 'Sonraki Hafta Açılışından 1 Gün Önce (20:00)'),
+        ('CURRENT_WEEK_DEACTIVATION_DAY', 'Mevcut Hafta Kapanış Günü (20:00)'),
+        ('MANUAL', 'Manuel Tetikleme'),
+    ]
+
+    STATUS_CHOICES = [
+        ('PENDING', 'İşleniyor'),
+        ('SUCCESS', 'Başarılı'),
+        ('FAILED', 'Başarısız'),
+    ]
+
+    department = models.CharField(
+        max_length=50, 
+        choices=User.DEPARTMENT_CHOICES, 
+        verbose_name="Bölüm"
+    )
+    week_number = models.IntegerField(verbose_name="Raporlanan Hafta")
+    trigger_type = models.CharField(
+        max_length=50, 
+        choices=TRIGGER_CHOICES, 
+        verbose_name="Tetikleme Tipi"
+    )
+    trigger_date = models.DateField(verbose_name="Tetikleme Tarihi")
+    recipient_email = models.EmailField(verbose_name="Alıcı E-posta")
+    recipient_name = models.CharField(max_length=255, blank=True, verbose_name="Alıcı Adı")
+    pdf_filename = models.CharField(max_length=255, blank=True, verbose_name="PDF Dosya Adı")
+    sent_at = models.DateTimeField(auto_now_add=True, verbose_name="Gönderim Zamanı")
+    status = models.CharField(
+        max_length=20, 
+        choices=STATUS_CHOICES, 
+        default='PENDING', 
+        verbose_name="Durum"
+    )
+    error_message = models.TextField(blank=True, null=True, verbose_name="Hata Mesajı")
+
+    class Meta:
+        verbose_name = "Akademik Rapor Mail Gönderim Kaydı"
+        verbose_name_plural = "Akademik Rapor Mail Gönderim Kayıtları"
+        ordering = ['-sent_at']
+        indexes = [
+            models.Index(fields=['department', 'week_number', 'recipient_email', 'status']),
+            models.Index(fields=['trigger_date', 'status']),
+        ]
+
+    def __str__(self):
+        return f"{self.get_department_display()} - Hafta {self.week_number} -> {self.recipient_email} [{self.status}]"
+

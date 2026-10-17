@@ -237,7 +237,11 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
         if is_teacher:
             return False
 
-        # ÖNCELİK 0: Eğer öğrenci bu hafta için 2 günlük aktif bir telafi kilit açmasına sahipse, kilit AÇIKTIR!
+        # ÖNCELİK 0: Tanıtım videosu izlenmemişse sistemdeki tüm haftalar kilitlidir.
+        if not intro_watched:
+            return True
+
+        # ÖNCELİK 1: Eğer öğrenci bu hafta için 2 günlük aktif bir telafi kilit açmasına sahipse, kilit AÇIKTIR!
         if obj.id in temp_unlocks:
             return False
 
@@ -252,16 +256,22 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
         if deact_date and now > deact_date:
             return True
 
-        # 3. Sıralı ilerleme kontrolü
+        # 3. Sıralı ilerleme kontrolü:
+        # Eğer önceki haftanın normal süresi henüz dolmamışsa (hala takvim olarak aktifse)
+        # sıralı ilerleme zorunludur.
+        # Ancak önceki hafta takvim olarak kapanmışsa (süresi geçmişse) veya mevcut haftanın
+        # ön değerlendirme testi aktifse, öğrencinin mevcut haftaya girmesi ve ön değerlendirme /
+        # telafi sürecine katılması engellenemez.
         if obj.week_number > 1:
-            prev_progress = progress_by_week.get(obj.week_number - 1)
-            if not prev_progress:
-                prev_week = WeeklyContent.objects.filter(week_number=obj.week_number - 1).first()
-                if prev_week:
-                    prev_progress = progress_by_content.get(prev_week.id)
-
-            if not prev_progress or not prev_progress.is_completed:
-                return True
+            prev_week = WeeklyContent.objects.filter(week_number=obj.week_number - 1).first()
+            if prev_week:
+                _, prev_deact_date = self._get_effective_dates(prev_week, user)
+                if prev_deact_date and now <= prev_deact_date:
+                    prev_progress = progress_by_week.get(obj.week_number - 1)
+                    if not prev_progress:
+                        prev_progress = progress_by_content.get(prev_week.id)
+                    if not prev_progress or not prev_progress.is_completed:
+                        return True
         
         return False
 

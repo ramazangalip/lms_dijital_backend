@@ -26,15 +26,25 @@ from django.db.models import Q
 from django.utils import timezone
 from django.contrib.auth import get_user_model
 
-from reportlab.lib import colors
-from reportlab.lib.pagesizes import A4, landscape
-from reportlab.platypus import (
-    SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether
-)
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.pdfgen import canvas
+try:
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4, landscape
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak, KeepTogether
+    )
+    from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+    from reportlab.pdfbase import pdfmetrics
+    from reportlab.pdfbase.ttfonts import TTFont
+    from reportlab.pdfgen import canvas
+    REPORTLAB_AVAILABLE = True
+except ImportError:
+    colors = None
+    A4 = landscape = None
+    SimpleDocTemplate = Paragraph = Spacer = Table = TableStyle = PageBreak = KeepTogether = None
+    getSampleStyleSheet = ParagraphStyle = None
+    pdfmetrics = TTFont = None
+    canvas = None
+    REPORTLAB_AVAILABLE = False
 
 from contents.models import (
     WeeklyContent,
@@ -68,6 +78,8 @@ _primary_font_bold = 'Helvetica-Bold'
 def _init_pdf_fonts():
     """ReportLab için Türkçe karakter destekli fontları kaydeder."""
     global _font_initialized, _primary_font, _primary_font_bold
+    if not REPORTLAB_AVAILABLE:
+        return 'Helvetica', 'Helvetica-Bold'
     if _font_initialized:
         return _primary_font, _primary_font_bold
 
@@ -101,35 +113,39 @@ def safe_tr(text):
     return str(text)
 
 
-class NumberedCanvas(canvas.Canvas):
-    """Sayfa numaralarını ve altbilgiyi dinamik olarak ekleyen özel canvas."""
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._saved_page_states = []
+if REPORTLAB_AVAILABLE:
+    class NumberedCanvas(canvas.Canvas):
+        """Sayfa numaralarını ve altbilgiyi dinamik olarak ekleyen özel canvas."""
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._saved_page_states = []
 
-    def showPage(self):
-        self._saved_page_states.append(dict(self.__dict__))
-        self._startPage()
+        def showPage(self):
+            self._saved_page_states.append(dict(self.__dict__))
+            self._startPage()
 
-    def save(self):
-        num_pages = len(self._saved_page_states)
-        for state in self._saved_page_states:
-            self.__dict__.update(state)
-            self.draw_footer(num_pages)
-            super().showPage()
-        super().save()
+        def save(self):
+            num_pages = len(self._saved_page_states)
+            for state in self._saved_page_states:
+                self.__dict__.update(state)
+                self.draw_footer(num_pages)
+                super().showPage()
+            super().save()
 
-    def draw_footer(self, page_count):
-        self.saveState()
-        self.setFont(_primary_font, 8)
-        self.setFillColor(colors.HexColor('#64748b'))
-        width, height = landscape(A4)
-        self.setStrokeColor(colors.HexColor('#e2e8f0'))
-        self.setLineWidth(0.5)
-        self.line(20, 22, width - 20, 22)
-        self.drawString(20, 12, "Bingöl Üniversitesi LMS Dijital Sınıf Sistemi • Resmi Akademik Rapor")
-        self.drawRightString(width - 20, 12, f"Sayfa {self._pageNumber} / {page_count}")
-        self.restoreState()
+        def draw_footer(self, page_count):
+            self.saveState()
+            self.setFont(_primary_font, 8)
+            self.setFillColor(colors.HexColor('#64748b'))
+            width, height = landscape(A4)
+            self.setStrokeColor(colors.HexColor('#e2e8f0'))
+            self.setLineWidth(0.5)
+            self.line(20, 22, width - 20, 22)
+            self.drawString(20, 12, "Bingöl Üniversitesi LMS Dijital Sınıf Sistemi • Resmi Akademik Rapor")
+            self.drawRightString(width - 20, 12, f"Sayfa {self._pageNumber} / {page_count}")
+            self.restoreState()
+else:
+    class NumberedCanvas:
+        pass
 
 
 # --- TARİH VE TETİKLEME HESAPLAMA ---

@@ -299,10 +299,17 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
         return max(0, int(diff // 3600))
 
     def get_is_pretest_completed(self, obj):
-        user, is_teacher, _, _, _, _, pretest_completed_wc_ids = self._get_context_data()
+        user, is_teacher, progress_by_content, _, _, temp_unlocks, pretest_completed_wc_ids = self._get_context_data()
         if not user or is_teacher:
             return True
         if not obj.is_pretest_active or obj.week_number < 2:
+            return True
+        # Telafi kilidi acik olan haftalarda on test tamamlanmis sayilir (tekrar gosterilmez)
+        if obj.id in temp_unlocks:
+            return True
+        # Pekistirme turunda (2. tur) on test tekrar gosterilmez / tamamlanmis sayilir
+        prog = progress_by_content.get(obj.id)
+        if prog and prog.current_attempt_round > 1:
             return True
         return obj.id in pretest_completed_wc_ids
 

@@ -300,16 +300,26 @@ class CompleteMaterialView(APIView):
 
         weekly_content = material.parent_content
 
-        # 1.5. Ön Değerlendirme Testi Zorunluluğu Kontrolü (Hafta >= 2 ve aktifse)
-        if weekly_content.is_pretest_active and weekly_content.week_number >= 2:
-            has_pretest_done = PreEvaluationAttempt.objects.filter(
-                student=request.user,
-                pre_test__weekly_content=weekly_content
-            ).exists()
-            if not has_pretest_done:
-                return Response({
-                    "error": "Bu haftanın materyallerine erişebilmek için lütfen önce Ön Değerlendirme Testini tamamlayınız."
-                }, status=status.HTTP_403_FORBIDDEN)
+        # 1.5. Ön Değerlendirme Testi Zorunluluğu Kontrolü (Sadece 1. normal turda zorunludur)
+        # Telafi veya Pekiştirme turunda (2. tur) ön test zorunluluğu aranmaz
+        is_remediation = TemporaryWeekUnlock.objects.filter(
+            student=request.user,
+            weekly_content=weekly_content,
+            expires_at__gt=timezone.now()
+        ).exists()
+        progress_obj = StudentProgress.objects.filter(student=request.user, weekly_content=weekly_content).first()
+        is_reinforcement = progress_obj and progress_obj.current_attempt_round > 1
+
+        if not is_remediation and not is_reinforcement:
+            if weekly_content.is_pretest_active and weekly_content.week_number >= 2:
+                has_pretest_done = PreEvaluationAttempt.objects.filter(
+                    student=request.user,
+                    pre_test__weekly_content=weekly_content
+                ).exists()
+                if not has_pretest_done:
+                    return Response({
+                        "error": "Bu haftanın materyallerine erişebilmek için lütfen önce Ön Değerlendirme Testini tamamlayınız."
+                    }, status=status.HTTP_403_FORBIDDEN)
 
         # 1.6. Telafi Kilit Modu Kontrolü:
         # Eğer bu hafta öğrenci için telafi amaçlı açılmışsa:
@@ -638,16 +648,20 @@ class QuizSubmitView(APIView):
         quiz = get_object_or_404(Quiz, id=str(quiz_id))
         weekly_content = quiz.material.parent_content
 
-        # 1.1. Ön Değerlendirme Testi Zorunluluğu Kontrolü
-        if weekly_content.is_pretest_active and weekly_content.week_number >= 2:
-            has_pretest_done = PreEvaluationAttempt.objects.filter(
-                student=request.user,
-                pre_test__weekly_content=weekly_content
-            ).exists()
-            if not has_pretest_done:
-                return Response({
-                    "error": "Ön değerlendirme testini tamamlamadan haftalık değerlendirme testini çözemezsiniz."
-                }, status=status.HTTP_403_FORBIDDEN)
+        # 1.1. Ön Değerlendirme Testi Zorunluluğu Kontrolü (Sadece 1. turda aranır)
+        progress_check = StudentProgress.objects.filter(student=request.user, weekly_content=weekly_content).first()
+        is_reinforcement_quiz = progress_check and progress_check.current_attempt_round > 1
+
+        if not is_reinforcement_quiz:
+            if weekly_content.is_pretest_active and weekly_content.week_number >= 2:
+                has_pretest_done = PreEvaluationAttempt.objects.filter(
+                    student=request.user,
+                    pre_test__weekly_content=weekly_content
+                ).exists()
+                if not has_pretest_done:
+                    return Response({
+                        "error": "Ön değerlendirme testini tamamlamadan haftalık değerlendirme testini çözemezsiniz."
+                    }, status=status.HTTP_403_FORBIDDEN)
 
         # 1.2. Telafi Kilit Modu Kontrolü:
         is_remediation_unlock = TemporaryWeekUnlock.objects.filter(

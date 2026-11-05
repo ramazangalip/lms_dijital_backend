@@ -60,7 +60,10 @@ from contents.models import (
     RemediationTimeTracking,
     StudentQuestion,
     PreEvaluationAttempt,
-    PreEvaluationAnswer
+    PreEvaluationAnswer,
+    Quiz,
+    QuizQuestion,
+    StudentAnswer
 )
 from preevaluation.models import PreEvaluationTest
 
@@ -897,17 +900,408 @@ def generate_pretest_analytics_pdf(department):
 
 
 # =====================================================================
-# MAİL GÖNDERİMİ VE 3 RAPORUN EKLENMESİ
+# 4. KONU BAZLI EKSİKLİK ANALİZİ (D2 ÖĞRENCİLERİ)
+# =====================================================================
+
+def fetch_topic_deficiency_data(department, week_number=None):
+    """
+    Belirtilen bölümdeki Kategori D2 öğrencileri için haftalık sınav sorularındaki
+    konu başlıklarına göre eksiklik analizi verilerini çeker ve hesaplar.
+    """
+    students = list(User.objects.filter(
+        is_staff=False,
+        is_teacher=False,
+        department__iexact=department,
+        category__iexact='d2'
+    ).order_by('first_name', 'last_name'))
+    student_ids = [s.id for s in students]
+
+    weeks_qs = WeeklyContent.objects.all().order_by('week_number')
+    if week_number is not None:
+        weeks_qs = weeks_qs.filter(week_number=week_number)
+    weeks = list(weeks_qs)
+    week_ids = [w.id for w in weeks]
+
+    quizzes = list(Quiz.objects.filter(material__parent_content_id__in=week_ids).select_related('material__parent_content'))
+    quiz_ids = [q.id for q in quizzes]
+
+    questions = list(QuizQuestion.objects.filter(quiz_id__in=quiz_ids).select_related('quiz__material__parent_content').order_by('order', 'id'))
+    q_by_quiz = defaultdict(list)
+    for q in questions:
+        q_by_quiz[q.quiz_id].append(q)
+
+    attempts = list(StudentQuizAttempt.objects.filter(
+        quiz_id__in=quiz_ids,
+        student_id__in=student_ids
+    ).select_related('student', 'quiz'))
+
+    # Her öğrenci için ilgili quizdeki öncelikli attempt (tercihen attempt_round=1)
+    attempt_by_stu_quiz = {}
+    for att in attempts:
+        key = (att.student_id, att.quiz_id)
+        if key not in attempt_by_stu_quiz or att.attempt_round == 1:
+            attempt_by_stu_quiz[key] = att
+
+    chosen_att_ids = [att.id for att in attempt_by_stu_quiz.values()]
+    answers = list(StudentAnswer.objects.filter(
+        attempt_id__in=chosen_att_ids
+    ).select_related('question', 'attempt__student', 'selected_option'))
+    
+    answers_by_att_q = {}
+    for ans in answers:
+        answers_by_att_q[(ans.attempt_id, ans.question_id)] = ans
+
+    result_weeks = []
+    
+    for w in weeks:
+        w_quizzes = [q for q in quizzes if q.material.parent_content_id == w.id]
+        if not w_quizzes:
+            result_weeks.append({
+                "week_number": w.week_number,
+                "week_title": w.title,
+                "has_quiz": False,
+                "topics": [],
+                "participating_students_count": 0,
+                "total_d2_students_count": len(students),
+                "student_breakdown": []
+            })
+            continue
+
+        w_questions = []
+        for qz in w_quizzes:
+            w_questions.extend(q_by_quiz.get(qz.id, []))
+
+        w_quiz_ids = {qz.id for qz in w_quizzes}
+        participating_stu_ids = set()
+        for att in attempt_by_stu_quiz.values():
+            if att.quiz_id in w_quiz_ids:
+                participating_stu_ids.add(att.student_id)
+        
+        part_count = len(participating_stu_ids)
+
+        topics_dict = defaultdict(lambda: {
+            'questions': [],
+            'question_orders': [],
+            'wrong_student_ids': set(),
+            'total_answers_count': 0,
+            'wrong_answers_count': 0
+        })
+
+        for q_idx, q in enumerate(w_questions):
+            topic_name = q.topic.strip() if (q.topic and q.topic.strip()) else "Genel / Belirtilmemiş Konu"
+            q_order_display = q.order + 1 if q.order is not None else q_idx + 1
+            topics_dict[topic_name]['questions'].append(q)
+            topics_dict[topic_name]['question_orders'].append(q_order_display)
+
+            for stu_id in participating_stu_ids:
+                att = attempt_by_stu_quiz.get((stu_id, q.quiz_id))
+                if att:
+                    ans = answers_by_att_q.get((att.id, q.id))
+                    if ans:
+                        topics_dict[topic_name]['total_answers_count'] += 1
+                        if not ans.is_correct:
+                            topics_dict[topic_name]['wrong_answers_count'] += 1
+                            topics_dict[topic_name]['wrong_student_ids'].add(stu_id)
+
+        total_q_count = len(w_questions)
+        topic_stats = []
+        for t_name, t_info in sorted(topics_dict.items(), key=lambda x: len(x[1]['wrong_student_ids']), reverse=True):
+            wrong_stu_count = len(t_info['wrong_student_ids'])
+            wrong_ans_count = t_info['wrong_answers_count']
+            deficiency_rate = round((wrong_stu_count / part_count) * 100, 1) if part_count > 0 else 0.0
+            success_rate = round(100.0 - deficiency_rate, 1) if part_count > 0 else 100.0
+            
+            if deficiency_rate >= 50.0:
+                status_label = "CİDDİ EKSİKLİK"
+                status_color = "#dc2626"
+            elif deficiency_rate >= 25.0:
+                status_label = "ORTA DÜZEY"
+                status_color = "#ea580c"
+            else:
+                status_label = "DÜŞÜK DÜZEY"
+                status_color = "#2563eb"
+
+            topic_stats.append({
+                "topic": t_name,
+                "question_orders": sorted(t_info['question_orders']),
+                "question_count": len(t_info['questions']),
+                "wrong_student_count": wrong_stu_count,
+                "wrong_answers_count": wrong_ans_count,
+                "participating_count": part_count,
+                "deficiency_percentage": deficiency_rate,
+                "success_percentage": success_rate,
+                "status_label": status_label,
+                "status_color": status_color
+            })
+
+        stu_breakdown = []
+        for stu in students:
+            stu_atts = [attempt_by_stu_quiz.get((stu.id, qz.id)) for qz in w_quizzes if attempt_by_stu_quiz.get((stu.id, qz.id))]
+            has_participated = len(stu_atts) > 0
+            avg_score = round(sum(a.score for a in stu_atts) / len(stu_atts), 1) if has_participated else None
+            
+            wrong_topics_for_stu = defaultdict(list)
+            if has_participated:
+                for att in stu_atts:
+                    for q in q_by_quiz.get(att.quiz_id, []):
+                        ans = answers_by_att_q.get((att.id, q.id))
+                        if ans and not ans.is_correct:
+                            t_name = q.topic.strip() if (q.topic and q.topic.strip()) else "Genel / Belirtilmemiş Konu"
+                            q_ord = q.order + 1 if q.order is not None else 1
+                            wrong_topics_for_stu[t_name].append(q_ord)
+
+            stu_breakdown.append({
+                "student_id": stu.id,
+                "email": stu.email,
+                "full_name": f"{stu.first_name} {stu.last_name}".strip() or stu.username,
+                "has_participated": has_participated,
+                "score": avg_score,
+                "wrong_topics": [
+                    {"topic": tn, "wrong_questions": sorted(q_ords)}
+                    for tn, q_ords in wrong_topics_for_stu.items()
+                ],
+                "wrong_topics_count": len(wrong_topics_for_stu)
+            })
+
+        specified_topic_count = len([t for t in topic_stats if t['topic'] != 'Genel / Belirtilmemiş Konu'])
+        result_weeks.append({
+            "week_number": w.week_number,
+            "week_title": w.title,
+            "has_quiz": True,
+            "total_questions_count": total_q_count,
+            "specified_topic_count": specified_topic_count if specified_topic_count > 0 else len(topic_stats),
+            "topics": topic_stats,
+            "participating_students_count": part_count,
+            "total_d2_students_count": len(students),
+            "student_breakdown": stu_breakdown
+        })
+
+    return {
+        "department": department,
+        "department_name": dict(User.DEPARTMENT_CHOICES).get(department, department),
+        "total_d2_students": len(students),
+        "weeks": result_weeks
+    }
+
+
+def generate_topic_deficiency_analytics_pdf(department, week_number=None):
+    """
+    Kategori D2 öğrencileri için haftalık sınav sorularındaki konu başlıklarına göre
+    eksiklik analizi PDF raporunu üretir.
+    Sadece kompakt, şık ve odaklı tek tablo formatını içerir.
+    """
+    font_reg, font_bld = _init_pdf_fonts()
+    data = fetch_topic_deficiency_data(department, week_number=week_number)
+    total_d2 = data.get('total_d2_students', 0)
+    weeks = data.get('weeks', [])
+
+    buffer = BytesIO()
+    doc = SimpleDocTemplate(
+        buffer,
+        pagesize=landscape(A4),
+        leftMargin=30,
+        rightMargin=30,
+        topMargin=25,
+        bottomMargin=25
+    )
+
+    now_str = timezone.now().astimezone(ISTANBUL_TZ).strftime('%d.%m.%Y %H:%M')
+
+    # Temel Stiller
+    style_date = ParagraphStyle(
+        'RDate',
+        fontName=font_reg,
+        fontSize=8.5,
+        leading=11,
+        textColor=colors.HexColor('#334155'),
+        alignment=1
+    )
+
+    style_card_title = ParagraphStyle(
+        'CTitle',
+        fontName=font_bld,
+        fontSize=13,
+        leading=16,
+        textColor=colors.white
+    )
+
+    style_stat_num = ParagraphStyle(
+        'SNum',
+        fontName=font_bld,
+        fontSize=14,
+        leading=16,
+        textColor=colors.white,
+        alignment=1
+    )
+
+    style_th = ParagraphStyle(
+        'THCol',
+        fontName=font_bld,
+        fontSize=7.5,
+        leading=9.5,
+        textColor=colors.white,
+        alignment=1
+    )
+
+    style_td_center = ParagraphStyle(
+        'TDCenter',
+        fontName=font_bld,
+        fontSize=8,
+        leading=10,
+        textColor=colors.HexColor('#1e293b'),
+        alignment=1
+    )
+
+    style_td_center_reg = ParagraphStyle(
+        'TDCenterReg',
+        fontName=font_reg,
+        fontSize=8,
+        leading=10,
+        textColor=colors.HexColor('#1e293b'),
+        alignment=1
+    )
+
+    style_td_left = ParagraphStyle(
+        'TDLeft',
+        fontName=font_reg,
+        fontSize=8,
+        leading=10.5,
+        textColor=colors.HexColor('#0f172a'),
+        alignment=0
+    )
+
+    story = []
+
+    if not weeks:
+        story.append(Paragraph(f"Rapor Tarihi: {now_str}", style_date))
+        story.append(Spacer(1, 15))
+        story.append(Paragraph("Sistemde raporlanacak hafta veya değerlendirme testi bulunamadı.", style_td_center))
+        doc.build(story)
+        return buffer.getvalue()
+
+    for w_idx, w_data in enumerate(weeks):
+        if w_idx > 0:
+            story.append(PageBreak())
+
+        topics = w_data.get('topics', [])
+        part_count = w_data.get('participating_students_count', 0)
+        total_q_count = w_data.get('total_questions_count', sum(t.get('question_count', 0) for t in topics))
+        total_topics_count = len(topics)
+        specified_topic_count = w_data.get('specified_topic_count', total_topics_count)
+
+        # 1. EN ÜSTTE TARİH (ORTALI)
+        story.append(Paragraph(f"Rapor Tarihi: {now_str}", style_date))
+        story.append(Spacer(1, 10))
+
+        # 2. KOYU LACİVERT BAŞLIK KARTI
+        card_content = [
+            [
+                Paragraph(
+                    f"<b>Haftalık Değerlendirme</b><br/><font color='#cbd5e1' size='7.5'>Toplam Soru: {total_q_count} | Toplam Konu Başlığı: {specified_topic_count}</font>",
+                    style_card_title
+                ),
+                Paragraph(
+                    f"<b>{total_d2}</b><br/><font color='#a5b4fc' size='6.5'><b>D2 ÖĞRENCİ</b></font>",
+                    style_stat_num
+                ),
+                Paragraph(
+                    f"<b>{part_count}</b><br/><font color='#a5b4fc' size='6.5'><b>SINAVA GİREN</b></font>",
+                    style_stat_num
+                ),
+                Paragraph(
+                    f"<b>{total_topics_count}</b><br/><font color='#a5b4fc' size='6.5'><b>KONU SAYISI</b></font>",
+                    style_stat_num
+                ),
+            ]
+        ]
+        card_table = Table(card_content, colWidths=[482, 100, 100, 100])
+        card_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#1a1a36')),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('TOPPADDING', (0, 0), (-1, -1), 8),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+            ('LEFTPADDING', (0, 0), (0, -1), 12),
+            ('RIGHTPADDING', (-1, 0), (-1, -1), 12),
+        ]))
+        story.append(card_table)
+        story.append(Spacer(1, 10))
+
+        if not topics:
+            empty_table = Table([[Paragraph("Bu haftaya ait henüz değerlendirme testi veya soru tanımlanmamıştır.", style_td_center)]], colWidths=[782])
+            empty_table.setStyle(TableStyle([
+                ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor('#f8fafc')),
+                ('BOX', (0, 0), (-1, -1), 0.5, colors.HexColor('#e2e8f0')),
+                ('PADDING', (0, 0), (-1, -1), 15),
+            ]))
+            story.append(empty_table)
+            continue
+
+        # 3. KONU EKSİKLİK VE BAŞARI TABLOSU
+        table_rows = [
+            [
+                Paragraph("<b>SIRA</b>", style_th),
+                Paragraph("<b>KONU BAŞLIĞI / KAZANIM</b>", style_th),
+                Paragraph("<b>SORU SAYISI</b>", style_th),
+                Paragraph("<b>YANLIŞ YAPAN ÖĞRENCİ</b>", style_th),
+                Paragraph("<b>TOPLAM YANLIŞ CEVAP</b>", style_th),
+                Paragraph("<b>EKSİKLİK ORANI (%)</b>", style_th),
+            ]
+        ]
+
+        for idx, t in enumerate(topics):
+            s_color = t['status_color']
+            s_label = t['status_label']
+
+            topic_cell_html = (
+                f"<b>{t['topic']}</b><br/>"
+                f"<font color='{s_color}' size='6.8'><b>Durum: {s_label}</b></font>"
+            )
+
+            perc_cell_html = (
+                f"<b><font color='{s_color}' size='8.5'>%{t['deficiency_percentage']}</font></b><br/>"
+                f"<font color='#64748b' size='6.5'>{t['wrong_student_count']} / {part_count} Öğr.</font>"
+            )
+
+            table_rows.append([
+                Paragraph(str(idx + 1), style_td_center),
+                Paragraph(topic_cell_html, style_td_left),
+                Paragraph(str(t['question_count']), style_td_center),
+                Paragraph(f"{t['wrong_student_count']} Öğrenci", style_td_center_reg),
+                Paragraph(str(t['wrong_answers_count']), style_td_center),
+                Paragraph(perc_cell_html, style_td_center),
+            ])
+
+        main_table = Table(table_rows, colWidths=[42, 330, 75, 115, 105, 115], repeatRows=1)
+        main_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1a1a36')),
+            ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+            ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor('#cbd5e1')),
+            ('TOPPADDING', (0, 0), (-1, -1), 5),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 5),
+            ('LEFTPADDING', (0, 0), (-1, -1), 6),
+            ('RIGHTPADDING', (0, 0), (-1, -1), 6),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor('#fafafa')]),
+        ]))
+        story.append(main_table)
+
+    doc.build(story)
+    return buffer.getvalue()
+
+
+# =====================================================================
+# MAİL GÖNDERİMİ VE 4 RAPORUN EKLENMESİ
 # =====================================================================
 
 def send_academic_report(department, week_number, trigger_type, trigger_date=None, force=False):
     """
     Belirtilen bölüm için akademisyene e-posta gönderir.
     Mail içeriğinde sadece resmi başlık ve bilgilendirme yer alır,
-    panele ait 3 PDF raporu aynen ek olarak iliştirilir:
+    panele ait 4 PDF raporu aynen ek olarak iliştirilir:
       1. Öğrenci Analizleri Raporu (14 Haftalık Genel Performans)
       2. Chatbot Analizi Raporu (Soru ve Yanıt Dökümü)
       3. Ön Değerlendirme Analizi Raporu (Ön Test & Telafi Sonuçları)
+      4. Konu Eksiklik Analiz Raporu (Sınav Konu Başlıkları ve D2 Eksiklik Oranları)
     """
     if trigger_date is None:
         trigger_date = timezone.now().astimezone(ISTANBUL_TZ).date()
@@ -922,17 +1316,19 @@ def send_academic_report(department, week_number, trigger_type, trigger_date=Non
 
     dept_display = dict(User.DEPARTMENT_CHOICES).get(department, department)
 
-    # 3 PDF RAPORUNU ÜRET
-    logger.info(f"{dept_display} için 3 PDF raporu üretiliyor...")
+    # 4 PDF RAPORUNU ÜRET
+    logger.info(f"{dept_display} için 4 PDF raporu üretiliyor...")
     pdf_bulk = generate_student_analytics_bulk_pdf(department)
     pdf_chat = generate_chatbot_analytics_pdf(department)
     pdf_pretest = generate_pretest_analytics_pdf(department)
+    pdf_topic = generate_topic_deficiency_analytics_pdf(department, week_number=week_number)
 
     fn_bulk = f"{department}_Ogrenci_Analizleri_Raporu.pdf"
     fn_chat = f"{department}_Chatbot_Analiz_Raporu.pdf"
     fn_pretest = f"{department}_On_Degerlendirme_Analiz_Raporu.pdf"
+    fn_topic = f"{department}_Hafta_{week_number}_Konu_Eksiklik_Analiz_Raporu.pdf"
 
-    subject = f"[LMS DİJİTAL] {dept_display} - Akademik Analiz Raporları (Öğrenci, Chatbot, Ön Değerlendirme)"
+    subject = f"[LMS DİJİTAL] {dept_display} - Akademik Analiz Raporları (Öğrenci, Chatbot, Ön Değerlendirme, Konu Eksiklik)"
 
     sent_count = 0
     skipped_count = 0
@@ -961,7 +1357,7 @@ def send_academic_report(department, week_number, trigger_type, trigger_date=Non
             trigger_date=trigger_date,
             recipient_email=recipient_email,
             recipient_name=recipient_name,
-            pdf_filename=f"{fn_bulk}, {fn_chat}, {fn_pretest}",
+            pdf_filename=f"{fn_bulk}, {fn_chat}, {fn_pretest}, {fn_topic}",
             status='PENDING'
         )
 
@@ -988,11 +1384,12 @@ def send_academic_report(department, week_number, trigger_type, trigger_date=Non
                   
                   <div style="background: #f1f5f9; padding: 14px 18px; border-radius: 10px; margin: 18px 0; border-left: 4px solid #1e3a8a;">
                     <p style="margin: 0 0 8px 0; font-weight: 800; color: #1e3a8a; font-size: 12px; text-transform: uppercase;">
-                      E-Posta Ekinde Yer Alan Raporlar (3 Adet PDF):
+                      E-Posta Ekinde Yer Alan Raporlar (4 Adet PDF):
                     </p>
                     <p style="margin: 5px 0;">📎 <b>1. Öğrenci Analizleri Raporu:</b> 14 haftalık akademik performans, T1/T2 tamamlama yüzdeleri, çalışma süreleri ve sınav skorları.</p>
                     <p style="margin: 5px 0;">📎 <b>2. Chatbot Analiz Raporu:</b> Öğrencilerin yapay zeka chatbot ile olan soru-yanıt etkileşimleri ve haftalık dökümleri.</p>
                     <p style="margin: 5px 0;">📎 <b>3. Ön Değerlendirme Analiz Raporu:</b> Haftalık ön değerlendirme test sonuçları, tetiklenen telafi kilitleri ve telafi süreci ilerlemeleri.</p>
+                    <p style="margin: 5px 0;">📎 <b>4. Konu Eksiklik Analiz Raporu:</b> {week_number}. Hafta sınav sorularına ait konu başlıkları, D2 öğrencilerinin konu bazlı eksiklik sayıları ve yüzdelik oranları.</p>
                   </div>
 
                   <p style="margin-top: 15px; color: #475569;">
@@ -1015,17 +1412,18 @@ def send_academic_report(department, week_number, trigger_type, trigger_date=Non
             )
             msg.content_subtype = "html"
 
-            # 3 PDF DOSYASINI DA EKE İLİŞTİR
+            # 4 PDF DOSYASINI DA EKE İLİŞTİR
             msg.attach(fn_bulk, pdf_bulk, "application/pdf")
             msg.attach(fn_chat, pdf_chat, "application/pdf")
             msg.attach(fn_pretest, pdf_pretest, "application/pdf")
+            msg.attach(fn_topic, pdf_topic, "application/pdf")
 
             msg.send(fail_silently=False)
 
             log_entry.status = 'SUCCESS'
             log_entry.save(update_fields=['status'])
             sent_count += 1
-            logger.info(f"3 Analiz raporu maili başarıyla gönderildi: {recipient_email} ({department})")
+            logger.info(f"4 Analiz raporu maili başarıyla gönderildi: {recipient_email} ({department})")
 
         except Exception as e:
             logger.error(f"Akademik rapor mail gönderim hatası ({recipient_email}): {e}", exc_info=True)

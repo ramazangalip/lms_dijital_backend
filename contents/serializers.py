@@ -19,7 +19,7 @@ class QuizQuestionSerializer(serializers.ModelSerializer):
     options = QuizOptionSerializer(many=True)
     class Meta:
         model = QuizQuestion
-        fields = ['id', 'question_text', 'order', 'options','explanation']
+        fields = ['id', 'question_text', 'topic', 'order', 'options', 'explanation']
 
 class QuizSerializer(serializers.ModelSerializer):
     id = serializers.CharField(read_only=True) 
@@ -466,23 +466,61 @@ class WeeklyContentSerializer(serializers.ModelSerializer):
             keep_mat_ids.append(mat_obj.id)
 
             if mat_obj.content_type == 'form' and q_data:
-                Quiz.objects.filter(material=mat_obj).delete()
+                quiz_instance, _ = Quiz.objects.get_or_create(material=mat_obj)
+                if q_data.get('title'):
+                    quiz_instance.title = q_data.get('title')
+                if 'description' in q_data:
+                    quiz_instance.description = q_data.get('description', '')
+                quiz_instance.save()
+
                 qs_list = q_data.pop('questions', [])
-                quiz_instance = Quiz.objects.create(
-                    material=mat_obj, 
-                    title=q_data.get('title', ''), 
-                    description=q_data.get('description', '')
-                )
+                existing_questions = list(quiz_instance.questions.all().order_by('order', 'id'))
+                kept_q_ids = []
+
                 for q_idx, q_val in enumerate(qs_list):
+                    q_id = q_val.get('id')
+                    q_obj = None
+                    if q_id:
+                        q_obj = next((q for q in existing_questions if str(q.id) == str(q_id) and q.id not in kept_q_ids), None)
+                    if not q_obj and q_idx < len(existing_questions):
+                        cand = existing_questions[q_idx]
+                        if cand.id not in kept_q_ids:
+                            q_obj = cand
+                    if not q_obj:
+                        q_obj = QuizQuestion(quiz=quiz_instance)
+
+                    q_obj.question_text = q_val.get('question_text', q_obj.question_text if q_obj.pk else '')
+                    raw_topic = q_val.get('topic')
+                    q_obj.topic = raw_topic.strip() if (raw_topic and isinstance(raw_topic, str) and raw_topic.strip()) else None
+                    q_obj.order = q_val.get('order', q_idx)
+                    if 'explanation' in q_val and q_val.get('explanation') is not None:
+                        q_obj.explanation = q_val.get('explanation')
+                    q_obj.save()
+                    kept_q_ids.append(q_obj.id)
+
                     opts_list = q_val.pop('options', [])
-                    question_instance = QuizQuestion.objects.create(
-                        quiz=quiz_instance, 
-                        question_text=q_val.get('question_text', ''), 
-                        order=q_idx
-                    )
-                    for o_val in opts_list:
-                        o_val.pop('id', None)
-                        QuizOption.objects.create(question=question_instance, **o_val)
+                    existing_opts = list(q_obj.options.all().order_by('id'))
+                    kept_opt_ids = []
+                    for o_idx, o_val in enumerate(opts_list):
+                        o_id = o_val.get('id')
+                        o_obj = None
+                        if o_id:
+                            o_obj = next((o for o in existing_opts if str(o.id) == str(o_id) and o.id not in kept_opt_ids), None)
+                        if not o_obj and o_idx < len(existing_opts):
+                            cand_o = existing_opts[o_idx]
+                            if cand_o.id not in kept_opt_ids:
+                                o_obj = cand_o
+                        if not o_obj:
+                            o_obj = QuizOption(question=q_obj)
+
+                        o_obj.option_text = o_val.get('option_text', '')
+                        o_obj.is_correct = bool(o_val.get('is_correct', False))
+                        o_obj.save()
+                        kept_opt_ids.append(o_obj.id)
+
+                    QuizOption.objects.filter(question=q_obj).exclude(id__in=kept_opt_ids).delete()
+
+                QuizQuestion.objects.filter(quiz=quiz_instance).exclude(id__in=kept_q_ids).delete()
 
         raw_cards = self.initial_data.get('flashcards', [])
         existing_cards = list(content.flashcards.all())
@@ -576,6 +614,7 @@ class IntroCompleteSerializer(serializers.Serializer):
 class ActivityTrackSerializer(serializers.Serializer):
     weekly_content_id = serializers.CharField() 
     seconds = serializers.IntegerField(default=30)
+    material_id = serializers.CharField(required=False, allow_null=True)
 
 class StudentAnalyticsSerializer(serializers.ModelSerializer):
     total_time_spent = serializers.SerializerMethodField()

@@ -226,15 +226,29 @@ class TrackActivityView(APIView):
             ).first()
 
             if active_unlock:
-                rem_tracking, _ = RemediationTimeTracking.objects.get_or_create(
-                    student=request.user,
-                    weekly_content=weekly_content,
-                    material_id=material_id,
+                mat_id_val = None
+                if material_id:
+                    try:
+                        mat_id_val = int(material_id)
+                        if not Material.objects.filter(id=mat_id_val).exists():
+                            mat_id_val = None
+                    except (ValueError, TypeError):
+                        mat_id_val = None
+
+                rem_tracking = RemediationTimeTracking.objects.filter(
                     temporary_unlock=active_unlock,
-                    date=date.today()
-                )
+                    material_id=mat_id_val
+                ).first()
+                if not rem_tracking:
+                    rem_tracking = RemediationTimeTracking.objects.create(
+                        student=request.user,
+                        weekly_content=weekly_content,
+                        material_id=mat_id_val,
+                        temporary_unlock=active_unlock,
+                        duration_seconds=0
+                    )
                 rem_tracking.duration_seconds += seconds
-                rem_tracking.save()
+                rem_tracking.save(update_fields=['duration_seconds'])
 
                 active_unlock.total_duration_seconds += seconds
                 active_unlock.save(update_fields=['total_duration_seconds'])
@@ -354,7 +368,7 @@ class CompleteMaterialView(APIView):
                 student=request.user,
                 temporary_unlock=active_unlock,
                 material__parent_content=weekly_content
-            ).count()
+            ).exclude(material__content_type='form').count()
 
             rem_perc = min(100.0, round((done_study_count / study_mats_count) * 100, 2)) if study_mats_count > 0 else 100.0
             active_unlock.completion_percentage = rem_perc
@@ -438,12 +452,22 @@ class CompletedMaterialIdsView(APIView):
     def get(self, request):
         from django.db.models import Q
         
-        # 1. Öğrencinin haftalık tur bilgilerini al
+        # 1. Aktif telafi kilitlerini al
+        active_unlocks = list(TemporaryWeekUnlock.objects.filter(
+            student=request.user,
+            expires_at__gt=timezone.now()
+        ))
+        active_unlock_wc_ids = set(u.weekly_content_id for u in active_unlocks)
+
+        # 2. Öğrencinin normal haftalık tur bilgilerini al
+        # DİKKAT: Eğer bir hafta şu an telafi modundaysa, normal tamamlanma kayıtları DEĞİL,
+        # sadece telafi tamamlanma kayıtları (RemediationCompletedMaterial) geçerlidir!
         student_progresses = StudentProgress.objects.filter(student=request.user)
         
-        # 2. Dinamik bir filtre oluştur (Hafta X'te Tur Y verilerini getir)
         query = Q()
         for prog in student_progresses:
+            if prog.weekly_content_id in active_unlock_wc_ids:
+                continue
             query |= Q(
                 material__parent_content=prog.weekly_content, 
                 attempt_round=prog.current_attempt_round
@@ -451,7 +475,7 @@ class CompletedMaterialIdsView(APIView):
         
         completed_set = set()
 
-        # 3. Sadece aktif tura ait olan tamamlanmış materyal ID'lerini çek
+        # 3. Normal (telafi dışı) haftaların tamamlanmış materyallerini çek
         if query:
             normal_ids = CompletedMaterial.objects.filter(
                 query,
@@ -459,12 +483,8 @@ class CompletedMaterialIdsView(APIView):
             ).values_list('material_id', flat=True)
             completed_set.update(str(m_id) for m_id in normal_ids)
 
-        # 4. Aktif telafi kilitleri kapsamındaki tamamlanan materyalleri de ekle
-        active_unlocks = TemporaryWeekUnlock.objects.filter(
-            student=request.user,
-            expires_at__gt=timezone.now()
-        )
-        if active_unlocks.exists():
+        # 4. Aktif telafi kilitleri kapsamındaki tamamlanan materyalleri ekle
+        if active_unlocks:
             rem_ids = RemediationCompletedMaterial.objects.filter(
                 student=request.user,
                 temporary_unlock__in=active_unlocks
@@ -1525,4 +1545,42 @@ class PreTestAnalyticsView(APIView):
             "avg_remediation_progress": avg_rem_progress,
             "students": report_students
         }, status=200)
-
+
+
+
+class TopicDeficiencyAnalyticsView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        if not (request.user.is_staff or getattr(request.user, 'is_teacher', False)):
+            return Response({"error": "Bu rapora erişim yetkiniz bulunmamaktadır."}, status=status.HTTP_403_FORBIDDEN)
+
+        department = request.query_params.get('department')
+        if not department or department == 'all':
+            department = getattr(request.user, 'department', None)
+        if not department:
+            return Response({"error": "Bölüm parametresi belirtilmelidir."}, status=status.HTTP_400_BAD_REQUEST)
+
+        week_param = request.query_params.get('week')
+        week_num = None
+        if week_param:
+            try:
+                week_num = int(week_param)
+            except ValueError:
+                week_num = None
+
+        as_pdf = request.query_params.get('pdf') in ('1', 'true', 'True')
+        if as_pdf:
+            from django.http import HttpResponse
+            from .services.academic_report_service import generate_topic_deficiency_analytics_pdf
+            pdf_bytes = generate_topic_deficiency_analytics_pdf(department, week_number=week_num)
+            if not pdf_bytes:
+                return Response({"error": "PDF raporu üretilemedi."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            response = HttpResponse(pdf_bytes, content_type='application/pdf')
+            filename = f"{department}_Hafta_{week_num if week_num else 'Tum'}_Konu_Eksiklik_Raporu.pdf"
+            response['Content-Disposition'] = f'attachment; filename="{filename}"'
+            return response
+
+        from .services.academic_report_service import fetch_topic_deficiency_data
+        data = fetch_topic_deficiency_data(department, week_number=week_num)
+        return Response(data, status=status.HTTP_200_OK)

@@ -2,7 +2,7 @@ from django.urls import path
 from .views import *
 
 urlpatterns = [
-      # Öğrencinin veri göndereceği endpoint
+    # Öğrencinin veri göndereceği endpoint
     path('track-activity/', TrackActivityView.as_view(), name='track_activity'),
     # Hem öğrencilerin listelemesi hem de hocaların içerik eklemesi için ortak endpoint
     path('list/', WeeklyContentView.as_view(), name='weekly_contents_list'),
@@ -11,8 +11,6 @@ urlpatterns = [
     # Belirli bir haftanın detaylarını (video ve podcast listesini) getirmek için
     path('week/<int:week_number>/', ContentDetailView.as_view(), name='week_detail'),
 
-  
-    
     # Hocanın tüm öğrencileri göreceği endpoint
     path('teacher/analytics/', TeacherAnalyticsView.as_view(), name='teacher_analytics'),
     
@@ -34,4 +32,5 @@ urlpatterns = [
     path('departments/', DepartmentListView.as_view(), name='department-list'),
     path('pre-test/<int:pre_test_id>/submit/', PreTestSubmitView.as_view(), name='pretest-submit'),
     path('pre-test-analytics/', PreTestAnalyticsView.as_view(), name='pretest-analytics'),
+    path('topic-deficiency-analytics/', TopicDeficiencyAnalyticsView.as_view(), name='topic-deficiency-analytics'),
 ]

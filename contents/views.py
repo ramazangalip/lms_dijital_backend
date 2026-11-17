@@ -1353,7 +1353,7 @@ class PreTestAnalyticsView(APIView):
     def get(self, request):
         from collections import defaultdict
         dept_param = request.query_params.get('department')
-        week_param = request.query_params.get('week_number')
+        week_param = request.query_params.get('week_number') or request.query_params.get('week')
 
         # KURAL: Yalnızca D2 kategorisindeki öğrenciler listelenecek
         students = User.objects.filter(
@@ -1402,9 +1402,22 @@ class PreTestAnalyticsView(APIView):
             answers_by_attempt[ans.attempt_id].append(ans)
 
         # Aktif ve tamamlanan telafi kilitlerini çek
-        temp_unlocks = list(TemporaryWeekUnlock.objects.filter(
+        temp_unlocks_qs = TemporaryWeekUnlock.objects.filter(
             student_id__in=student_ids
-        ).select_related('weekly_content'))
+        ).select_related('weekly_content', 'source_pre_test__weekly_content')
+
+        if week_param and week_param != 'all':
+            try:
+                w_val = int(week_param)
+                from django.db.models import Q
+                temp_unlocks_qs = temp_unlocks_qs.filter(
+                    Q(source_pre_test__weekly_content__week_number=w_val) |
+                    Q(weekly_content__week_number=w_val)
+                )
+            except ValueError:
+                pass
+
+        temp_unlocks = list(temp_unlocks_qs)
         
         # Tamamlanan telafi materyallerini çek
         rem_completed_records = list(RemediationCompletedMaterial.objects.filter(

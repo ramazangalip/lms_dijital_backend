@@ -603,4 +603,72 @@ class AcademicReportEmailLog(models.Model):
 
     def __str__(self):
         return f"{self.get_department_display()} - Hafta {self.week_number} -> {self.recipient_email} [{self.status}]"
+
+
+class Badge(models.Model):
+    """
+    Öğrencilere verilecek Başarı Rozet Tanımı.
+    Django admin üzerinden yeni rozetler eklenebilir veya düzenlenebilir.
+    """
+    name = models.CharField(max_length=150, verbose_name="Rozet Adı")
+    description = models.TextField(verbose_name="Rozet Açıklaması")
+    icon_name = models.CharField(
+        max_length=50, 
+        default="Award", 
+        verbose_name="Icon name",
+        help_text="Lucide ikon adı (örn: Zap, Trophy, Star)"
+    )
+    color = models.CharField(
+        max_length=30, 
+        default="#EF4444", 
+        verbose_name="Color",
+        help_text="Tailwind rengi veya HEX kodu"
+    )
+    badge_type = models.CharField(
+        max_length=100, 
+        verbose_name="Badge type",
+        help_text="Rozet türü / koşulu (Örn: İlk Materyal Tamamlama, 2 Hafta Üst Üste Başarı)"
+    )
+    requirement_text = models.TextField(
+        verbose_name="Gereksinim Metni",
+        help_text="Örn: 2 hafta üst üste testi tamamla"
+    )
+    order = models.PositiveIntegerField(default=0, verbose_name="Sıralama")
+
+    class Meta:
+        verbose_name = "Rozet Tanımı"
+        verbose_name_plural = "Rozet Tanımları"
+        ordering = ['order', 'id']
+
+    def __str__(self):
+        return self.name
+
+
+class StudentBadge(models.Model):
+    """
+    Öğrencinin kazandığı rozetleri tutan ilişki tablosu.
+    """
+    student = models.ForeignKey(
+        User, 
+        on_delete=models.CASCADE, 
+        related_name='earned_badges',
+        verbose_name="Öğrenci"
+    )
+    badge = models.ForeignKey(
+        Badge, 
+        on_delete=models.CASCADE, 
+        related_name='student_earnings',
+        verbose_name="Rozet"
+    )
+    earned_at = models.DateTimeField(auto_now_add=True, verbose_name="Kazanılma Tarihi")
+
+    class Meta:
+        verbose_name = "Öğrenci Rozet Kazanımı"
+        verbose_name_plural = "Öğrenci Rozet Kazanımları"
+        unique_together = ('student', 'badge')
+        ordering = ['-earned_at']
+
+    def __str__(self):
+        return f"{self.student.get_full_name()} - {self.badge.name}"
+
 

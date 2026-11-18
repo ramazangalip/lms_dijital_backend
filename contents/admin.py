@@ -220,4 +220,20 @@ class AcademicReportEmailLogAdmin(admin.ModelAdmin):
             )
             if res.get('sent_count', 0) > 0:
                 success_count += 1
-        self.message_user(request, f"{success_count} adet rapor başarıyla yeniden gönderildi.")
+        self.message_user(request, f"{success_count} adet rapor başarıyla yeniden gönderildi.")
+
+
+@admin.register(Badge)
+class BadgeAdmin(admin.ModelAdmin):
+    list_display = ('name', 'badge_type', 'icon_name', 'color')
+    search_fields = ('name', 'description', 'badge_type')
+    list_filter = ('badge_type',)
+    ordering = ('order', 'id')
+
+
+@admin.register(StudentBadge)
+class StudentBadgeAdmin(admin.ModelAdmin):
+    list_display = ('student', 'badge', 'earned_at')
+    list_filter = ('badge', 'earned_at')
+    search_fields = ('student__first_name', 'student__last_name', 'student__email', 'badge__name')
+

@@ -1740,3 +1740,17 @@ class D2MaterialPointsAnalyticsView(APIView):
             "departments": dept_list
         }, status=status.HTTP_200_OK)
 
+
+class StudentDevelopmentAnalyticsView(APIView):
+    """
+    Giriş yapan öğrencinin Bireysel Gelişim Paneli verilerini,
+    haftalık ilerleme durumunu, ustalık düzeylerini ve başarı rozetlerini döner.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        from .services.badge_service import get_student_development_data
+        data = get_student_development_data(request.user)
+        return Response(data, status=status.HTTP_200_OK)
+
+

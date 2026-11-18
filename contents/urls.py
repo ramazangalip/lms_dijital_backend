@@ -33,4 +33,5 @@ urlpatterns = [
     path('pre-test/<int:pre_test_id>/submit/', PreTestSubmitView.as_view(), name='pretest-submit'),
     path('pre-test-analytics/', PreTestAnalyticsView.as_view(), name='pretest-analytics'),
     path('topic-deficiency-analytics/', TopicDeficiencyAnalyticsView.as_view(), name='topic-deficiency-analytics'),
+    path('d2-material-points/', D2MaterialPointsAnalyticsView.as_view(), name='d2-material-points'),
 ]

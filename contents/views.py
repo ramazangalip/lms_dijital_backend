@@ -534,13 +534,32 @@ class StudentAnalyticsView(APIView):
 
         # --- DURUM A: ÖĞRENCİ KENDİ PANELİNE GİRİYOR ---
         if not is_teacher:
-            # Öğrenci için tüm sınıfın dökümünü hesaplama! Sadece kendi puanını dön.
-            # Bu kısım saniyeler süren çökme riskini 1 milisaniyeye indirir.
+            import datetime
+            from django.utils import timezone
+
+            cutoff = timezone.make_aware(datetime.datetime(2026, 11, 6, 0, 0, 0))
+            cms = CompletedMaterial.objects.filter(
+                student=request.user, 
+                attempt_round=1
+            ).select_related('material')
+
+            points_before = 0
+            points_after = 0
+            for cm in cms:
+                raw_pt = cm.material.point_value
+                earned = 1 if (raw_pt in (0, 10, None)) else raw_pt
+                if cm.completed_at < cutoff:
+                    points_before += earned
+                else:
+                    points_after += earned
+
             return Response({
                 "id": request.user.id,
                 "first_name": request.user.first_name,
                 "last_name": request.user.last_name,
                 "total_points": getattr(request.user, 'total_points', 0),
+                "points_before": points_before,
+                "points_after": points_after,
                 "overall_progress": 0,
                 "weekly_breakdown": [] # Öğrenci paneli için detay gerekmiyor
             }, status=200)
@@ -1597,3 +1616,127 @@ class TopicDeficiencyAnalyticsView(APIView):
         from .services.academic_report_service import fetch_topic_deficiency_data
         data = fetch_topic_deficiency_data(department, week_number=week_num)
         return Response(data, status=status.HTTP_200_OK)
+
+
+class D2MaterialPointsAnalyticsView(APIView):
+    """
+    Kategorisi D2 olan öğrencilerin materyallerden kazandıkları puanları,
+    06.11.2026 tarihinden önce ve sonra olmak üzere bölüm bazında listeler.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        if not (request.user.is_staff or getattr(request.user, 'is_teacher', False)):
+            return Response({"error": "Bu rapora erişim yetkiniz bulunmamaktadır."}, status=status.HTTP_403_FORBIDDEN)
+
+        import datetime
+        from django.utils import timezone
+        from collections import defaultdict
+
+        # 06.11.2026 00:00:00 cutoff tarihi
+        cutoff = timezone.make_aware(datetime.datetime(2026, 11, 6, 0, 0, 0))
+
+        dept_filter = request.query_params.get('department')
+
+        students_qs = User.objects.filter(category__iexact='d2', is_teacher=False, is_staff=False)
+        if dept_filter and dept_filter != 'all':
+            students_qs = students_qs.filter(department=dept_filter)
+
+        students_qs = students_qs.order_by('department', 'first_name', 'last_name')
+
+        dept_map = dict(User.DEPARTMENT_CHOICES)
+
+        # Tüm completed materials verisini optimize şekilde çekelim
+        student_ids = list(students_qs.values_list('id', flat=True))
+        completed_records = CompletedMaterial.objects.filter(
+            student_id__in=student_ids,
+            attempt_round=1
+        ).select_related('material', 'material__parent_content').order_by('completed_at')
+
+        student_materials = defaultdict(list)
+        for cr in completed_records:
+            student_materials[cr.student_id].append(cr)
+
+        grouped_by_dept = defaultdict(list)
+        total_all_before = 0
+        total_all_after = 0
+
+        for student in students_qs:
+            dept_key = student.department or 'diger'
+            cms = student_materials.get(student.id, [])
+
+            before_items = []
+            after_items = []
+            before_points = 0
+            after_points = 0
+
+            for cm in cms:
+                raw_pt = cm.material.point_value
+                earned = 1 if (raw_pt in (0, 10, None)) else raw_pt
+
+                item_info = {
+                    "material_id": cm.material.id,
+                    "title": cm.material.title,
+                    "content_type": cm.material.content_type,
+                    "week_number": cm.material.parent_content.week_number if cm.material.parent_content else None,
+                    "completed_at": cm.completed_at.isoformat(),
+                    "points": earned
+                }
+
+                if cm.completed_at < cutoff:
+                    before_points += earned
+                    before_items.append(item_info)
+                else:
+                    after_points += earned
+                    after_items.append(item_info)
+
+            total_pts = before_points + after_points
+            total_all_before += before_points
+            total_all_after += after_points
+
+            grouped_by_dept[dept_key].append({
+                "id": student.id,
+                "first_name": student.first_name,
+                "last_name": student.last_name,
+                "full_name": student.get_full_name() or student.username,
+                "email": student.email,
+                "department": dept_key,
+                "department_display": dept_map.get(dept_key, dept_key.capitalize()),
+                "category": student.category,
+                "points_before": before_points,
+                "points_after": after_points,
+                "total_points": total_pts,
+                "user_total_points": student.total_points,
+                "materials_before_count": len(before_items),
+                "materials_after_count": len(after_items),
+                "total_materials_count": len(cms),
+                "materials_before": before_items,
+                "materials_after": after_items,
+            })
+
+        dept_list = []
+        for d_key, s_list in grouped_by_dept.items():
+            d_before = sum(s["points_before"] for s in s_list)
+            d_after = sum(s["points_after"] for s in s_list)
+            dept_list.append({
+                "department_key": d_key,
+                "department_name": dept_map.get(d_key, d_key.capitalize()),
+                "student_count": len(s_list),
+                "total_points_before": d_before,
+                "total_points_after": d_after,
+                "total_points_overall": d_before + d_after,
+                "students": s_list
+            })
+
+        return Response({
+            "cutoff_date": cutoff.isoformat(),
+            "cutoff_date_formatted": "06.11.2026",
+            "summary": {
+                "total_students": len(students_qs),
+                "total_points_before": total_all_before,
+                "total_points_after": total_all_after,
+                "total_points_overall": total_all_before + total_all_after,
+            },
+            "departments": dept_list
+        }, status=status.HTTP_200_OK)
+

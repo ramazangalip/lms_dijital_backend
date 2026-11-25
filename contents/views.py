@@ -571,9 +571,8 @@ class StudentAnalyticsView(APIView):
             serializer = StudentAnalyticsSerializer(student)
             return Response(serializer.data, status=200)
 
-        total_weeks_count = WeeklyContent.objects.count()
-        
-        # Eğer henüz hiç hafta eklenmemişse hata oluşmaması için kontrol
+        all_weeks = list(WeeklyContent.objects.all().order_by('week_number'))
+        total_weeks_count = len(all_weeks)
         if total_weeks_count == 0:
             total_weeks_count = 1 
 
@@ -584,7 +583,7 @@ class StudentAnalyticsView(APIView):
             students = students.filter(department=dept_param)
 
         students = students.prefetch_related(
-            'studentprogress_set',
+            'studentprogress_set__weekly_content',
             'timetracking_set',
             'studentquizattempt_set'
         ).order_by('first_name')
@@ -613,6 +612,19 @@ class StudentAnalyticsView(APIView):
                 avg_act = 0
                 avg_diff = 0
 
+            # Haftalık tamamlama dökümü
+            prog_map = {p.weekly_content_id: p for p in progresses}
+            weekly_breakdown = []
+            for w in all_weeks:
+                p = prog_map.get(w.id)
+                pct = round(p.completion_percentage, 1) if p else 0.0
+                is_comp = bool(p.is_completed or p.completion_percentage >= 100) if p else False
+                weekly_breakdown.append({
+                    "week_number": w.week_number,
+                    "progress": pct,
+                    "is_completed": is_comp
+                })
+
             analytics_data.append({
                 "id": str(s.id),
                 "first_name": s.first_name,
@@ -625,7 +637,7 @@ class StudentAnalyticsView(APIView):
                 "avg_actual": avg_act,
                 "avg_diff": avg_diff,
                 "total_quizzes_taken": len(attempts),
-                "weekly_breakdown": []
+                "weekly_breakdown": weekly_breakdown
             })
 
         return Response(analytics_data, status=200)
